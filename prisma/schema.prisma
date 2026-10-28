@@ -1,0 +1,4004 @@
+// ============================================================================
+// GMAO Web — Prisma schema, Maintenance / Work Order module (Phase 1)
+//
+// Reverse-engineered from the original WinForms app's embedded SQL
+// (ordre_travail.cs, ot_backend.cs, lancement_ot_preventive.cs,
+// Demande_Intervention.cs, and related ot_* files).
+//
+// Naming: original French DB column/table names are preserved so historical
+// data can be migrated 1:1. Add English aliases later via Prisma @map if
+// desired — not done here to keep the mapping to legacy SQL traceable.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// Reference / master data
+// ----------------------------------------------------------------------------
+
+model Utilisateur {
+  id         Int      @id @default(autoincrement())
+  login      String   @unique
+  motPasse   String   @map("mot_passe") // bcrypt hash
+  fonction   String?
+  role       String   @default("Utilisateur") // "Admin" | "Utilisateur"
+  photo      Bytes?
+  mail       String?
+  telephone  String?
+  deleted    Boolean  @default(false)
+  createdOts OrdreTravail[] @relation("OtCreateur")
+  signature  Signature?
+  notifications Notification[]
+  notificationAlertes NotificationAlerte[]
+
+  @@map("utilisateur")
+}
+
+model Intervenant {
+  id          Int      @id @default(autoincrement())
+  nom         String
+  tauxHoraire Decimal? @map("taux_horaire")
+  idFonction  Int?     @map("id_fonction")
+  fonction    FonctionIntervenant? @relation(fields: [idFonction], references: [id])
+  deleted     Boolean  @default(false)
+  typeCout    String?  @map("type_cout")
+  chefEquipe  Boolean? @map("chef_equipe")
+
+  supervisedOts     OrdreTravail[]      @relation("OtSuperviseur")
+  ordoIntervenants  OtOrdoIntervenant[]
+  cfFabrication     ProdRapportCfFabrication[]
+  cfEmballage       ProdRapportCfEmballage[]
+  chefsEquipe       ProdRapportChefEquipe[]
+  atelierJobsDemandeur AtelierCreer[]
+  atelierSuivisOperateur AtelierSuiviJournalier[] @relation("AtelierOperateur")
+  outilAffectations TabLancementAffectation[]
+  demandesInterventionAsDemandeur DemandeIntervention[]
+
+  @@map("intervenant")
+}
+
+model FonctionIntervenant {
+  id          Int    @id @default(autoincrement())
+  code        String? // CORRECTED: real column, found while auditing the migration script — never modeled before this
+  designation String
+  intervenants Intervenant[]
+  ressourcesFonction OtRessourcesFonction[]
+  gammeRessourcesFonction GammeRessourcesFonction[]
+
+  @@map("fonction_intervenant")
+}
+
+model Equipement {
+  id             Int          @id @default(autoincrement())
+  idParent       Int?         @map("id_parent")
+  parent         Equipement?  @relation("EquipementHierarchy", fields: [idParent], references: [id])
+  enfants        Equipement[] @relation("EquipementHierarchy")
+  code           String?
+  designation    String
+  ordre          Int?
+  deleted        Boolean      @default(false)
+  engin          Int?         @unique // CORRECTED: real column, links to Engin — resolves the Fleet module's "is a vehicle in the Equipement tree" open question (yes, via this column, in this direction)
+  enginRef       Engin?       @relation(fields: [engin], references: [id])
+  tecGeo         Int?         @map("tec_geo") // exact meaning unconfirmed — possibly a technical/geographic zone code
+  typeEquip      Int?         @map("type_equip") // equipment type classification — no matching reference table found yet
+
+  // Work orders referencing this equipment at different tree levels
+  otAtelier        OrdreTravail[] @relation("OtAtelier")
+  otEquipement     OrdreTravail[] @relation("OtEquipement")
+  otSousEquipement OrdreTravail[] @relation("OtSousEquipement")
+  otOrgane         OrdreTravail[] @relation("OtOrgane")
+
+  diComponents  DemandeIntervention[] @relation("DiEquipement")
+  prodFabCompteurs ProdFabCompteur[]
+  prodRapportFabProduits ProdRapportFabProduit[]
+  prodRapportEmbProduits ProdRapportEmbProduit[]
+  prodRapportFourEntres ProdRapportFourEntre[]
+  prodRapportFourSorties ProdRapportFourSortie[]
+  prodMesureRapports ProdMesureRapport[]
+  prodFabTonnages ProdFabTonnage[]
+  prodRapportCfFabrications ProdRapportCfFabrication[]
+  prodRapportCfEmballages ProdRapportCfEmballage[]
+  prodRapportAnomalies ProdRapportAnomalie[]
+  prodMesures ProdMesure[]
+  prodRapportChefEquipes ProdRapportChefEquipe[]
+  prodRapportHeures ProdRapportHeure[]
+  prodEquipements ProdEquipement[]
+  bsmEquipements BsmEquipement[]
+  daArticleEquipements DaArticleEquipement[]
+  atelierJobsAtelier        AtelierCreer[] @relation("AtelierJobAtelier")
+  atelierJobsEquipement     AtelierCreer[] @relation("AtelierJobEquipement")
+  atelierJobsSousEquipement AtelierCreer[] @relation("AtelierJobSousEquipement")
+  atelierJobsOrgane         AtelierCreer[] @relation("AtelierJobOrgane")
+
+  generale     EquipementGenerale?
+  techniques   EquipementTechnique[]
+  images       EquipementImage[]
+  pdfs         EquipementPdf[]
+  observations EquipementObservation[]
+  prevision    EquipementPrevision?
+  articlesListe TableauArticleEquipement[]
+  compteurLiaisons CompteurLiaison[]
+  magasinSousTraitance MagasinSousTraitance[]
+
+  // idParent drives the self-referencing hierarchy tree, queried
+  // constantly throughout the app for equipment navigation — with
+  // 46,000+ real rows, an unindexed self-join here is a real, confirmed
+  // cost, not a theoretical one.
+  @@index([idParent])
+  @@map("equipement")
+}
+
+model ParametreClasseIntervention {
+  id          Int    @id @default(autoincrement())
+  code        String?
+  designation String
+  ordreTravail OrdreTravail[]
+
+  @@map("parametre_classe_intervention")
+}
+
+model ParametreIntervention {
+  id          Int      @id @default(autoincrement())
+  code        String?
+  intervention String
+  deleted     Boolean  @default(false)
+  typpe       String?
+  ordreTravail OrdreTravail[]
+  compteurLiaisons CompteurLiaison[]
+  operations OperationMaintenance[]
+
+  @@map("parametre_intervention")
+}
+
+model ParametreAnomalie {
+  id        Int      @id @default(autoincrement())
+  code      String?
+  anomalie  String
+  deleted   Boolean  @default(false)
+  operateur String?
+
+  ordreTravail          OrdreTravail[]
+  demandeIntervention   DemandeIntervention[]
+  operationsDiagnostic  OperationDiagnostic[]
+  symptomes             SymptomeDefaillance[]
+  otDiagnosticM         OtDiagnosticM[]
+  otDiagnosticDef       OtDiagnosticDef[]
+  otDiagnosticDetection OtDiagnosticDetection[]
+  otDiagnosticSymptome  OtDiagnosticSymptome[]
+  // Self-referencing cause/effect hierarchy (Ishikawa-style) via
+  // RelationAnomalie — modeled through that join table below rather than
+  // a direct self-relation, matching the real schema's shape (a separate
+  // relation_anomalie table, not a parent-id column on parametre_anomalie
+  // itself).
+  anomalieRelationsAsChild  RelationAnomalie[] @relation("AnomalieChild")
+  anomalieRelationsAsParent RelationAnomalie[] @relation("AnomalieParent")
+
+  @@map("parametre_anomalie")
+}
+
+model GammeOperatoire {
+  id            Int      @id @default(autoincrement())
+  idPlan        Int?     @map("id_plan")
+  code          String?
+  designation   String
+  urgence       String?
+  statut        String?
+  type          String?
+  idClasse      Int?     @map("id_classe")
+  idSuperviseur Int?     @map("id_superviseur")
+  duree         Int?     // CORRECTED: real column is int, was modeled as Decimal
+  varDuree      String?  @map("var_duree") // CORRECTED: real column is varchar(20) — a tolerance descriptor, not a number
+  deleted       Boolean  @default(false)
+  operation     String?
+  pTyppe        Int?     @map("p_typpe") // CORRECTED: real column is int, was modeled as String
+
+  ressourcesFonction GammeRessourcesFonction[]
+  ressourcesOutillage GammeRessourcesOutillage[]
+  ressourcesPdr GammeRessourcesPdr[]
+  centresCharge GammeCentreCharge[]
+
+  @@map("gamme_operatoire")
+}
+
+// ----------------------------------------------------------------------------
+// Intervention request (Demande d'Intervention) — precursor to a Work Order
+// ----------------------------------------------------------------------------
+
+model DemandeIntervention {
+  id                    Int       @id @default(autoincrement())
+  idDemandeur           Int?      @map("id_demandeur")
+  demandeur             Intervenant? @relation(fields: [idDemandeur], references: [id])
+  // CONFIRMED via decompiled source (Demande_Intervention.cs:841 —
+  // "inner join intervenant on demande_intervention.id_demandeur =
+  // intervenant.id") during a systematic re-verification pass against
+  // the real C# source. Was previously modeled as a bare, unconfirmed
+  // int out of caution; now a real relation.
+  dateEmission          DateTime  @map("date_emission")
+  heureEmission         String?   @map("heure_emission")
+  urgence               String?   // Elevée / Moyenne / Faible
+  idDefaillance         Int?      @map("id_defaillance")
+  defaillance           ParametreAnomalie? @relation(fields: [idDefaillance], references: [id])
+  descriptionDefaillance String?  @map("description_defaillance")
+  createur              String?
+  atelier               Int?
+  equipement            Int?
+  equipementRef         Equipement? @relation("DiEquipement", fields: [equipement], references: [id])
+  sousEquipement        Int?      @map("sous_equipement")
+  organe                Int?
+  arretMachine          Boolean?  @map("arret_machine")
+  dateArret             DateTime? @map("date_arret")
+  heureArret            String?   @map("heure_arret")
+  statut                String?   // CORRECTED — found while re-checking the decompiled C# source
+  // directly against real, already-migrated data. The real source column
+  // is an `int`, confirmed both via INFORMATION_SCHEMA and by sampling
+  // real rows directly — NOT the rich 5-value string vocabulary this
+  // comment previously (wrongly) borrowed from the separate DA workflow.
+  // Confirmed real values, each traced to the exact line of C# that sets
+  // them: 0 = "En Attente" (the literal default at DI creation,
+  // Demande_Intervention.cs's own INSERT), 1 = set specifically when an
+  // Ordre de Travail gets created for this DI (ordre_travail.cs's own
+  // UPDATE — matches the UI's "Validée" label), 5 = "Annulée" (the
+  // cancel action in Demande_Intervention.cs, which also allows
+  // returning from 5 back to 0). No evidence was found of a genuinely
+  // separate "Clôturée" value for this specific column in practice —
+  // real Postgres data confirms only "0"/"1" (plus one single stray
+  // "Confirmée" row, likely a leftover from this project's own earlier,
+  // wrong UI work, not real legacy data). See
+  // migration/fixups/di-statut-recovery.ts for the corrective pass.
+  nDi                   String?   @map("n_di")
+  deleted               Boolean   @default(false)
+
+  ordresTravail OrdreTravail[]
+
+  @@map("demande_intervention")
+}
+
+// ----------------------------------------------------------------------------
+// Work Order (Ordre de Travail) — the central entity of the module
+// ----------------------------------------------------------------------------
+
+model OrdreTravail {
+  id             Int       @id @default(autoincrement())
+  nOt            String    @map("n_ot")
+  idDi           Int?      @map("id_di")
+  demandeIntervention DemandeIntervention? @relation(fields: [idDi], references: [id])
+
+  dateDebut      DateTime? @map("date_debut")
+  heureDebut     String?   @map("heure_debut")
+  dateFin        DateTime? @map("date_fin")
+  heureFin       String?   @map("heure_fin")
+  debutPrevu     DateTime? @map("debut_prevu")
+  finPrevu       DateTime? @map("fin_prevu")
+
+  urgence        String?   // Elevée / Moyenne / Faible
+  statut         String    // En Cours / En Préparation / Planifié / En Attente Arrêt Machine / Sous-Traitant à contacter / Clôturé / Annulé
+  type           String    // Corrective / Corrective Curative / Corrective Palliative / Préventive / Préventive Systématique / Préventive Syst Compteur / Préventive Conditionnelle / Travaux Neufs
+
+  // NOTE: in the legacy app id_intervention is polymorphic — it references
+  // parametre_intervention for Corrective OTs, but gamme_operatoire for the
+  // three Préventive types (see the CASE WHEN in ot_backend.select_ot_general_detail).
+  // Prisma can't enforce two FKs on one column, so only the more common
+  // (Corrective) relation is a real FK; resolve the Préventive case in
+  // application code using `type` to decide which table to query.
+  idIntervention Int?      @map("id_intervention")
+  intervention   ParametreIntervention? @relation(fields: [idIntervention], references: [id])
+
+  idClasse       Int?      @map("id_classe")
+  classe         ParametreClasseIntervention? @relation(fields: [idClasse], references: [id])
+
+  idSuperviseur  Int?      @map("id_superviseur")
+  superviseur    Intervenant? @relation("OtSuperviseur", fields: [idSuperviseur], references: [id])
+
+  commentaire    String?
+  createur       String?
+  // CORRECTED comment only (not the relation itself, which nothing in
+  // the app actually consumes — checked directly, zero usage) — found
+  // while re-checking the decompiled C# source: the real source join is
+  // `ordre_travail.createur = utilisateur.id`, an INTEGER foreign key,
+  // not a login-string match as this relation's `references: [login]`
+  // implies. Real migrated data confirms the STORED VALUES are still
+  // genuinely usable, human-readable names ("HIBA Krema", "admin",
+  // etc.) — the migration correctly looked up the name from the integer
+  // id — so this is a relation-definition inaccuracy, not a data
+  // problem, and not worth a schema change given nothing depends on the
+  // relation resolving correctly today.
+  createurUser   Utilisateur? @relation("OtCreateur", fields: [createur], references: [login])
+  deleted        Boolean   @default(false)
+
+  atelier          Int?
+  atelierRef       Equipement? @relation("OtAtelier", fields: [atelier], references: [id])
+  equipement       Int?
+  equipementRef    Equipement? @relation("OtEquipement", fields: [equipement], references: [id])
+  sousEquipement   Int?      @map("sous_equipement")
+  sousEquipementRef Equipement? @relation("OtSousEquipement", fields: [sousEquipement], references: [id])
+  organe           Int?
+  organeRef        Equipement? @relation("OtOrgane", fields: [organe], references: [id])
+
+  idDefaillance  Int?      @map("id_defaillance")
+  defaillance    ParametreAnomalie? @relation(fields: [idDefaillance], references: [id])
+
+  // Related sub-modules
+  ressourcesFonction OtRessourcesFonction[]
+  centreCharge       OtCentreCharge[]
+  fichiers           OtFichier[]
+  commentaires       OtCommentaire[]
+  livraisons         OtBl[]
+  projets            OtProjet[]
+  reinitCompteurs    OtReinitCompteur[]
+  ressourcesOutil    OtRessourcesOutil[]
+  causesRealisation  OtCauseRealisation[]
+  ressourcesPdr      OtRessourcesPdr[]
+  diagnosticM        OtDiagnosticM[]
+  diagnosticDef      OtDiagnosticDef[]
+  diagnosticDetection OtDiagnosticDetection[]
+  diagnosticSymptome OtDiagnosticSymptome[]
+  diagnosticOperation OtDiagnosticOperation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([statut])
+  @@index([type])
+  @@index([dateDebut])
+  @@map("ordre_travail")
+}
+
+// Planning/scheduling: which staff (via a function/role) are assigned to an OT
+model OtRessourcesFonction {
+  id           Int      @id @default(autoincrement())
+  idOt         Int      @map("id_ot")
+  ordreTravail OrdreTravail @relation(fields: [idOt], references: [id])
+  idFonction   Int?     @map("id_fonction")
+  fonction     FonctionIntervenant? @relation(fields: [idFonction], references: [id])
+  nbreRequis   Int?     @map("nbre_requis") // 5 real source columns with no home here, found via migration-script audit — same story as DaAction.cause/nouvelleDate
+  minPlanif    Int?     @map("min_planif")
+  typeCout     String?  @map("type_cout")
+  dateDebut    DateTime? @map("date_debut")
+  heureDebut   String?  @map("heure_debut")
+
+  ordoIntervenants  OtOrdoIntervenant[]
+  ordoInterventions OtOrdoIntervention[]
+
+  @@map("ot_ressources_fonction")
+}
+
+// Actual staff scheduled against a resource/function slot, with time window
+model OtOrdoIntervenant {
+  id                  Int      @id @default(autoincrement())
+  idIntervenant       Int      @map("id_intervenant")
+  intervenant         Intervenant @relation(fields: [idIntervenant], references: [id])
+  idRessourceFonction Int      @map("id_ressource_fonction")
+  ressourceFonction   OtRessourcesFonction @relation(fields: [idRessourceFonction], references: [id])
+  debut               DateTime
+  fin                 DateTime
+  coutHoraire         Decimal? @map("cout_horaire") // hourly rate snapshot at scheduling time — confirmed real column, used by all cost/Pareto reporting
+
+  @@map("ot_ordo_intervenant")
+}
+
+// The actual operation performed (repair / test / diagnostic) within a slot
+model OtOrdoIntervention {
+  id                  Int      @id @default(autoincrement())
+  idRessourceFonction Int      @map("id_ressource_fonction")
+  ressourceFonction   OtRessourcesFonction @relation(fields: [idRessourceFonction], references: [id])
+  idOperation         Int      @map("id_operation")
+  typeOperation        String  @map("type_operation") // Réparation / Test / Diagnostic / Intervention
+
+  @@map("ot_ordo_intervention")
+}
+
+model OtCentreCharge {
+  id           Int      @id @default(autoincrement())
+  idOt         Int      @map("id_ot")
+  ordreTravail OrdreTravail @relation(fields: [idOt], references: [id])
+  idCentreCharge Int?   @map("id_centre_charge")
+  centreCharge ParametreCentreCharge? @relation(fields: [idCentreCharge], references: [id])
+
+  @@map("ot_centre_charge")
+}
+
+model OtFichier {
+  id           Int      @id @default(autoincrement())
+  idOt         Int      @map("id_ot")
+  ordreTravail OrdreTravail @relation(fields: [idOt], references: [id])
+  nomFichier   String?
+  chemin       String?
+
+  @@map("ot_fichier")
+}
+
+model OtCommentaire {
+  id           Int      @id @default(autoincrement())
+  idOt         Int      @map("id_ot")
+  ordreTravail OrdreTravail @relation(fields: [idOt], references: [id])
+  texte        String
+  auteur       String?
+  date         DateTime @default(now())
+
+  @@map("ot_commentaire")
+}
+
+// ----------------------------------------------------------------------------
+// Diagnostic (Ishikawa / AMDEC) sub-workflow attached to an OT
+// ----------------------------------------------------------------------------
+
+// NOTE: an earlier pass modeled a single `OtDiagnostic` table here, guessed
+// at columns (idSymptome/idDetection/conclusion) that don't match the real
+// schema at all. Replaced below with the actual 5-table diagnostic system
+// confirmed via the real schema export — see
+// docs/12-schema-validation-findings.md §9.
+
+model Symptome {
+  id          Int      @id @default(autoincrement())
+  code        String?
+  designation String
+  deleted     Boolean  @default(false)
+
+  defaillances SymptomeDefaillance[]
+  otSymptomes  OtDiagnosticSymptome[]
+
+  @@map("symptome")
+}
+
+// ----------------------------------------------------------------------------
+// Preventive maintenance plans (feed the OT-generation scheduler)
+// ----------------------------------------------------------------------------
+
+/// Confirmed columns via preventive_systematique.cs. `periode` is the unit
+/// for `frequence` (e.g. "Jour"/"Semaine"/"Mois"/"Année" — exact values
+/// not independently confirmed, inferred from the field's evident purpose).
+/// `lancerOtAvant` is a lead time: generate the OT this many days before
+/// the calculated due date, not exactly on it.
+model PrevSystematique {
+  id            Int      @id @default(autoincrement())
+  idGamme       Int?     @map("id_gamme")
+  frequence     Int?
+  periode       String?
+  dateDebut     DateTime? @map("date_debut")
+  heureDebut    String?  @map("heure_debut")
+  lancerOtAvant Int?     @map("lancer_ot_avant")
+  atelier       Int?
+  equipement    Int?
+  sousEquipement Int?    @map("sous_equipement")
+  organe        Int?
+  arr           Boolean  @default(false) // legacy queries filter `arr = 0` for active plans
+
+  echeances PrevSystEch[]
+
+  @@map("prev_systematique")
+}
+
+/// Due-date occurrence log for a PrevSystematique plan — confirmed real
+/// table, never modeled until the migration script surfaced the gap
+/// (the app's own preventive-maintenance generation logic computes due
+/// dates on the fly rather than reading this table, so this is added for
+/// migration/historical-data fidelity, not because the current app reads
+/// it — a real, known limitation, not silently glossed over).
+model PrevSystEch {
+  id       Int             @id @default(autoincrement())
+  idRep    Int             @map("id_rep")
+  plan     PrevSystematique @relation(fields: [idRep], references: [id])
+  dateEch  DateTime        @map("date_ech")
+  heureEch String?         @map("heure_ech")
+  deleted  Boolean         @default(false)
+
+  @@map("prev_syst_ech")
+}
+
+/// Confirmed columns via lancement_ot_preventive.cs's creation_ot_mesure.
+/// `typeValeur` ("Sup"/"Inf") + `valeurLancement` define the trigger
+/// condition against a manually-recorded measurement.
+model PrevConditionnelle {
+  id             Int      @id @default(autoincrement())
+  idGamme        Int?     @map("id_gamme")
+  mesure         String?  @db.VarChar(2000) // description of what's being measured — confirmed via real schema, missed in the original static-analysis pass
+  unite          String?  // unit of measure for the reading
+  valeurLancement Decimal? @map("valeur_lancement")
+  typeValeur     String?  @map("type_valeur") // "Sup" | "Inf"
+  atelier        Int?
+  equipement     Int?
+  sousEquipement Int?     @map("sous_equipement")
+  organe         Int?
+  arr            Boolean  @default(false)
+
+  mesures PrevMesure[]
+
+  @@map("prev_conditionnelle")
+}
+
+/// Measurement reading log for a PrevConditionnelle plan — same
+/// never-modeled-until-now situation as PrevSystEch above (real table,
+/// not read by the app's current on-the-fly PM logic). `mesurePar`/
+/// `creerPar` are Utilisateur ids in the source; kept as raw ints here
+/// (not resolved via the login lookup) since nothing on this model
+/// currently expects a login string — flagged rather than silently
+/// assumed to need the same treatment as createur-style fields elsewhere.
+model PrevMesure {
+  id          Int                @id @default(autoincrement())
+  idPrev      Int                @map("id_prev")
+  plan        PrevConditionnelle @relation(fields: [idPrev], references: [id])
+  mesurePar   Int?               @map("mesure_par")
+  creerPar    Int?               @map("creer_par")
+  dateMesure  DateTime           @map("date_mesure")
+  heureMesure String?            @map("heure_mesure")
+  valeur      Decimal
+
+  @@map("prev_mesure")
+}
+
+/// Confirmed real table. `idRep` targets PrevSystematique.id — confirmed
+/// by real source (ot_planning.cs and ot_planning_annuel.cs both join
+/// `prev_annuel.id_rep = prev_systematique.id` directly), resolving what
+/// was previously flagged here as an unconfirmed guess. Not modeled as
+/// a Prisma relation since PrevSystEch's own `id_rep` uses the same
+/// name/shape for a related-but-distinct concept, and disambiguating
+/// which of the two a given idRep belongs to isn't reliable from the
+/// column alone — resolved in application code by context instead.
+model PrevAnnuel {
+  id           Int      @id @default(autoincrement())
+  idRep        Int      @map("id_rep") // targets PrevSystematique.id — see model comment
+  dateEcheance DateTime @map("date_echeance")
+  typePeriode  String?  @map("type_periode")
+
+  @@map("prev_annuel")
+}
+
+/// Confirmed columns via lancement_ot_preventive.cs's creation_ot_compteur
+/// — the most involved of the three trigger mechanisms. `typeValeur`
+/// ("Sup"/"Inf") + `valeurLancement` define the trigger condition against
+/// the linked EquipementCompteur's current value. `reinitialisation`
+/// ("Oui"/"Non") controls whether the counter resets after triggering;
+/// `typeInitial` controls reset TIMING — "Au Lancement de l'OT" resets
+/// immediately, any other value defers the reset until the OT closes
+/// (tracked via OtReinitCompteur, which also prevents re-triggering the
+/// same plan while a reset is pending).
+model PrevCompteur {
+  id              Int      @id @default(autoincrement())
+  idGamme         Int?     @map("id_gamme")
+  idCompteur      Int?     @map("id_compteur")
+  compteur        EquipementCompteur? @relation(fields: [idCompteur], references: [id])
+  valeurLancement Decimal? @map("valeur_lancement")
+  typeValeur      String?  @map("type_valeur") // "Sup" | "Inf"
+  reinitialisation String? // "Oui" | "Non"
+  initial         Decimal? // reset value, when reinitialisation = "Oui"
+  typeInitial     String?  @map("type_initial") // "Au Lancement de l'OT" | (deferred to OT closure)
+  atelier         Int?
+  equipement      Int?
+  sousEquipement  Int?     @map("sous_equipement")
+  organe          Int?
+  arr             Boolean  @default(false)
+
+  reinitTracking OtReinitCompteur[]
+
+  @@map("prev_compteur")
+}
+
+/// Dedup/pending-reset tracking for counter-based preventive plans —
+/// confirmed real table (`ot_reinit_compteur`). A plan with a pending row
+/// here is excluded from re-triggering until the reset actually happens.
+model OtReinitCompteur {
+  id             Int          @id @default(autoincrement())
+  idPrevCompteur Int          @map("id_prev_compteur")
+  prevCompteur   PrevCompteur @relation(fields: [idPrevCompteur], references: [id])
+  idOt           Int          @map("id_ot")
+  ordreTravail   OrdreTravail @relation(fields: [idOt], references: [id])
+
+  @@map("ot_reinit_compteur")
+}
+
+model EquipementCompteur {
+  id           Int      @id @default(autoincrement())
+  idEquipement Int?     @map("id_equipement")
+  designation  String?
+  uniteMesure  String?  @map("unite_mesure")
+  valeurActuelle Decimal? @map("valeur_actuelle")
+  deleted      Boolean  @default(false)
+
+  enginCompteurInitial EnginCompteurInitial?
+  prevCompteurPlans PrevCompteur[]
+  historique EquipementCompteurHistorique[]
+  nouvellesValeurs EquipementCompteurNv[]
+  liaisons CompteurLiaison[]
+
+  @@map("equipement_compteur")
+}
+
+// ============================================================================
+// Production module (Phase 2) — brick/ceramics manufacturing line
+//
+// Reverse-engineered from prod_rapport.cs, prod_rapport_fuel.cs,
+// prod_param_*.cs, and prod_rapport_*_produit.cs.
+//
+// The plant has 4 fixed production sections (unite_production, a hardcoded
+// enum in the legacy UI, not a DB table — kept as a string here):
+//   Préparation -> Fabrication -> Four (kiln) -> Emballage (packaging)
+// ============================================================================
+
+/// Fixed values for the `uniteProduction` string field below (legacy
+/// hardcoded dropdown, not a DB-backed table): "Préparation" | "Fabrication"
+/// | "Four" | "Emballage"
+
+model ProdEquipement {
+  id              Int        @id @default(autoincrement())
+  idEquipement    Int        @map("id_equipement")
+  equipement      Equipement @relation(fields: [idEquipement], references: [id])
+  uniteProduction String     @map("unite_production")
+
+  @@map("prod_equipement")
+}
+
+model ProdTypeBrique {
+  id         Int      @id @default(autoincrement())
+  designation String
+  poid       Decimal? // fired (cuit) weight
+  poidVert   Decimal? @map("poid_vert") // green/unfired weight
+
+  fabProduits ProdRapportFabProduit[]
+  embProduits ProdRapportEmbProduit[]
+  fourEntre   ProdRapportFourEntre[]
+  fourSortie  ProdRapportFourSortie[]
+
+  @@map("prod_type_brique")
+}
+
+/// Generic measurement/quality parameter definitions, scoped to a target
+/// category ("cible": 1=Préparation général, 2=Préparation A/S, 3=Four
+/// qualité, 4=Fabrication qualité, 5=Fabrication horaire — inferred from
+/// prod_rapport.cs's insert_qualite_* method names).
+model ProdSaisie {
+  id                  Int      @id @default(autoincrement())
+  designation         String
+  unite               String?
+  preparationProduit  String?  @map("preparation_produit")
+  cible               Int      // 1-5, see comment above
+  deleted             Boolean  @default(false)
+  poidSecFab          Boolean  @default(false) @map("poid_sec_fab")
+  poidFour            Boolean  @default(false) @map("poid_four") // flags the reading used as kiln weight for auto tonnage calc
+
+  mesures ProdMesureRapport[]
+  prepASReadings ProdRapportPrepAS[]
+  mesuresConfig ProdMesure[]
+
+  @@map("prod_saisie")
+}
+
+model ProdFabCompteur {
+  id           Int            @id @default(autoincrement())
+  idUnite      Int            @map("id_unite")
+  unite        Equipement @relation(fields: [idUnite], references: [id])
+  idCompteur   Int            @map("id_compteur")
+
+  @@map("prod_fab_compteur")
+}
+
+// ----------------------------------------------------------------------------
+// Shift production report — the daily/per-shift master record
+// ----------------------------------------------------------------------------
+
+model ProdRapportGeneral {
+  id           Int      @id @default(autoincrement())
+  dateRapport  DateTime @map("date_rapport")
+  poste        String   // "Jour" | "Soir" | "Nuit"
+
+  fabProduits    ProdRapportFabProduit[]
+  embProduits    ProdRapportEmbProduit[]
+  fourEntre      ProdRapportFourEntre[]
+  fourSortie     ProdRapportFourSortie[]
+  mesures        ProdMesureRapport[]
+  prepAS         ProdRapportPrepAS[]
+  horaireFab     ProdRapportHoraireFabrication[]
+  tonnages       ProdFabTonnage[]
+  fuel           ProdFuel[]
+  gaz            ProdGaz[]
+  anomalies      ProdRapportAnomalie[]
+  cfFabrication  ProdRapportCfFabrication[]
+  cfEmballage    ProdRapportCfEmballage[]
+  chefsEquipe    ProdRapportChefEquipe[]
+  heures         ProdRapportHeure[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([dateRapport, poste])
+  @@map("prod_rapport_general")
+}
+
+/// Fabrication (forming/pressing) output: quantity + tonnage per equipment x brick type
+model ProdRapportFabProduit {
+  id         Int                @id @default(autoincrement())
+  idRapport  Int                @map("id_rapport")
+  rapport    ProdRapportGeneral @relation(fields: [idRapport], references: [id])
+  idUnite    Int                @map("id_unite")
+  unite      Equipement     @relation(fields: [idUnite], references: [id])
+  idProduit  Int                @map("id_produit")
+  produit    ProdTypeBrique     @relation(fields: [idProduit], references: [id])
+  quantite   Decimal            @default(0)
+  tonnage    Decimal            @default(0)
+
+  @@map("prod_rapport_fab_produit")
+}
+
+/// Packaging output: quantity per equipment x brick type, plus packaging units
+model ProdRapportEmbProduit {
+  id             Int                @id @default(autoincrement())
+  idRapport      Int                @map("id_rapport")
+  rapport        ProdRapportGeneral @relation(fields: [idRapport], references: [id])
+  idUnite        Int                @map("id_unite")
+  unite          Equipement     @relation(fields: [idUnite], references: [id])
+  idProduit      Int                @map("id_produit")
+  produit        ProdTypeBrique     @relation(fields: [idProduit], references: [id])
+  quantite       Decimal            @default(0)
+  nbrBobineFeuillard Decimal?       @map("nbr_bobine_feuillard") // strapping-film rolls used
+  nbrPallette    Decimal?           @map("nbr_pallette")
+
+  @@map("prod_rapport_emb_produit")
+}
+
+/// Kiln (four) input — unfired product going in
+model ProdRapportFourEntre {
+  id         Int                @id @default(autoincrement())
+  idRapport  Int                @map("id_rapport")
+  rapport    ProdRapportGeneral @relation(fields: [idRapport], references: [id])
+  idUnite    Int                @map("id_unite")
+  unite      Equipement     @relation(fields: [idUnite], references: [id])
+  idProduit  Int                @map("id_produit")
+  produit    ProdTypeBrique     @relation(fields: [idProduit], references: [id])
+  quantite   Decimal            @default(0)
+  tonnage    Decimal            @default(0)
+
+  @@map("prod_rapport_four_entre")
+}
+
+/// Kiln (four) output — fired product coming out
+model ProdRapportFourSortie {
+  id         Int                @id @default(autoincrement())
+  idRapport  Int                @map("id_rapport")
+  rapport    ProdRapportGeneral @relation(fields: [idRapport], references: [id])
+  idUnite    Int                @map("id_unite")
+  unite      Equipement     @relation(fields: [idUnite], references: [id])
+  idProduit  Int                @map("id_produit")
+  produit    ProdTypeBrique     @relation(fields: [idProduit], references: [id])
+  quantite   Decimal            @default(0)
+  tonnage    Decimal            @default(0)
+
+  @@map("prod_rapport_four_sortie")
+}
+
+/// Unified quality/measurement value entries (covers the legacy
+/// prod_rapport_four_qualite, prod_rapport_fabrication_qualite, and
+/// prod_rapport_prep_qualite / prep_general tables, which all share the
+/// same (id_rapport, id_unite, id_saisie, valeur) shape).
+model ProdMesureRapport {
+  id         Int                @id @default(autoincrement())
+  idRapport  Int                @map("id_rapport")
+  rapport    ProdRapportGeneral @relation(fields: [idRapport], references: [id])
+  idUnite    Int?               @map("id_unite")
+  unite      Equipement?    @relation(fields: [idUnite], references: [id])
+  idSaisie   Int                @map("id_qualite")
+  saisie     ProdSaisie         @relation(fields: [idSaisie], references: [id])
+  categorie  String             // "four_qualite" | "fabrication_qualite" | "prep_qualite" | "prep_general"
+  valeur     Decimal            @default(0)
+
+  @@map("prod_mesure_rapport")
+}
+
+/// Préparation A/S readings — two paired values per parameter (legacy
+/// prod_rapport_prep_as: valeur_a / valeur_s, likely "avant/après" or
+/// "arrivée/sortie" — confirm naming with the plant team).
+model ProdRapportPrepAS {
+  id         Int                @id @default(autoincrement())
+  idRapport  Int                @map("id_rapport")
+  rapport    ProdRapportGeneral @relation(fields: [idRapport], references: [id])
+  idUnite    Int?               @map("id_unite")
+  idSaisie   Int                @map("id_qualite")
+  saisie     ProdSaisie         @relation(fields: [idSaisie], references: [id])
+  valeurA    Decimal            @default(0) @map("valeur_a")
+  valeurS    Decimal            @default(0) @map("valeur_s")
+
+  @@map("prod_rapport_prep_as")
+}
+
+/// Hourly fabrication throughput — 8 hourly buckets per shift/parameter
+model ProdRapportHoraireFabrication {
+  id         Int                @id @default(autoincrement())
+  idRapport  Int                @map("id_rapport")
+  rapport    ProdRapportGeneral @relation(fields: [idRapport], references: [id])
+  idUnite    Int                @map("id_unite")
+  idSaisie   Int                @map("id_qualite")
+  h1         Decimal            @default(0)
+  h2         Decimal            @default(0)
+  h3         Decimal            @default(0)
+  h4         Decimal            @default(0)
+  h5         Decimal            @default(0)
+  h6         Decimal            @default(0)
+  h7         Decimal            @default(0)
+  h8         Decimal            @default(0)
+
+  @@map("prod_rapport_horaire_fabrication")
+}
+
+/// Daily fabrication tonnage total per equipment (separate from per-product tonnage)
+model ProdFabTonnage {
+  id         Int                @id @default(autoincrement())
+  idRapport  Int                @map("id_rapport")
+  rapport    ProdRapportGeneral @relation(fields: [idRapport], references: [id])
+  idUnite    Int                @map("id_unite")
+  unite      Equipement     @relation(fields: [idUnite], references: [id])
+  valeur     Decimal            @default(0)
+
+  @@map("prod_fab_tonnage")
+}
+
+/// Fuel consumption per shift, per named consumption point (legacy UI has 6
+/// fixed fields — labelled Séchoir 1/2/3, Four 1/2, and a 6th general one).
+model ProdFuel {
+  id         Int                @id @default(autoincrement())
+  idRapport  Int                @map("id_rapport")
+  rapport    ProdRapportGeneral @relation(fields: [idRapport], references: [id])
+  typeSaisie String             @map("type_saisie") // e.g. "Séchoir 1", "Séchoir 2", "Séchoir 3", "Four 1", "Four 2", "Général"
+  quantite   Decimal            @default(0)
+
+  @@map("prod_fuel")
+}
+
+// ============================================================================
+// Gas & electricity consumption tracking (Phase 17)
+//
+// Discovered via the real schema export — the Production module (Phase 2)
+// tracked fuel (6 confirmed points) but not gas or kiln electricity at
+// all. Unlike ProdFuel's 6 measurement points (confirmed from legacy
+// column headers), no equivalent confirmation was found for prod_gaz's
+// `type_saisie` enumeration — modeled as a free string, same shape as
+// ProdFuel, but the actual point labels are a reasonable guess, not
+// confirmed. The electricity table's 4 time-of-day buckets
+// (matin/pointe/nuit/soir) match Tunisia's standard STEG industrial
+// tariff periods, which is a well-known convention, not a guess.
+// ============================================================================
+
+model ProdGaz {
+  id         Int                @id @default(autoincrement())
+  idRapport  Int                @map("id_rapport")
+  rapport    ProdRapportGeneral @relation(fields: [idRapport], references: [id])
+  typeSaisie String             @map("type_saisie") // e.g. "Séchoir 1", "Séchoir 2", "Four" — NOT confirmed, unlike ProdFuel's points
+  quantite   Decimal            @default(0)
+
+  @@map("prod_gaz")
+}
+
+/// Effective-dated gas pricing/conversion coefficient — a simple lookup,
+/// not tied to a specific report.
+model ProdCoefficientGaz {
+  id          Int      @id @default(autoincrement())
+  coefficient Decimal?
+  date        DateTime?
+
+  @@map("prod_coefficient_gaz")
+}
+
+/// Kiln (four) electrical consumption by date, split across Tunisia's 4
+/// standard STEG industrial tariff periods.
+model ProdFourConsommationElectrique {
+  id          Int                    @id @default(autoincrement())
+  date        DateTime?
+  consMatin   Decimal?               @map("cons_matin")
+  consPointe  Decimal?               @map("cons_pointe")
+  consNuit    Decimal?               @map("cons_nuit")
+  consSoir    Decimal?               @map("cons_soir")
+  idUnite     Int                    @map("id_unite")
+  unite       ParametreUniteArticle  @relation(fields: [idUnite], references: [id])
+
+  @@map("prod_four_consommation_electrique")
+}
+
+/// Chef d'équipe (shift team lead) assigned to a Fabrication line for this
+/// report — "cf" = chef de fabrication. Links to Intervenant (staff), and
+/// is what lets the recap dashboard attribute output to a responsible lead
+/// (see prod_recap.cs: production-by-team-lead query).
+model ProdRapportCfFabrication {
+  id        Int                @id @default(autoincrement())
+  idRapport Int                @map("id_rapport")
+  rapport   ProdRapportGeneral @relation(fields: [idRapport], references: [id])
+  idUnite   Int                @map("id_unite")
+  unite     Equipement     @relation(fields: [idUnite], references: [id])
+  idCf      Int?               @map("id_cf")
+  cf        Intervenant?       @relation(fields: [idCf], references: [id])
+
+  @@unique([idRapport, idUnite])
+  @@map("prod_rapport_cf_fabrication")
+}
+
+/// Same as ProdRapportCfFabrication but for the Emballage (packaging) line
+/// (legacy: prod_rapport_emballage_cf.cs -> table prod_rapport_cf_emballage).
+model ProdRapportCfEmballage {
+  id        Int                @id @default(autoincrement())
+  idRapport Int                @map("id_rapport")
+  rapport   ProdRapportGeneral @relation(fields: [idRapport], references: [id])
+  idUnite   Int                @map("id_unite")
+  unite     Equipement     @relation(fields: [idUnite], references: [id])
+  idCf      Int?               @map("id_cf")
+  cf        Intervenant?       @relation(fields: [idCf], references: [id])
+
+  @@unique([idRapport, idUnite])
+  @@map("prod_rapport_cf_emballage")
+}
+
+// ============================================================================
+// Production anomalies
+// ============================================================================
+
+/// Production anomalies logged per section (unite_production) — master list
+model ProdAnomalie {
+  id              Int      @id @default(autoincrement())
+  anomalie        String
+  uniteProduction String   @map("unite_production")
+
+  rapports ProdRapportAnomalie[]
+
+  @@map("prod_anomalie")
+}
+
+/// Production anomalies logged against a specific shift report + equipment,
+/// with a duration (minutes) — separate from the Maintenance module's
+/// equipment breakdown/DI tracking.
+model ProdRapportAnomalie {
+  id          Int                @id @default(autoincrement())
+  idRapport   Int                @map("id_rapport")
+  rapport     ProdRapportGeneral @relation(fields: [idRapport], references: [id])
+  idUnite     Int                @map("id_unite")
+  unite       Equipement     @relation(fields: [idUnite], references: [id])
+  idAnomalie  Int                @map("id_anomalie")
+  anomalie    ProdAnomalie       @relation(fields: [idAnomalie], references: [id])
+  duree       Decimal            @default(0) // minutes
+
+  @@map("prod_rapport_anomalie")
+}
+
+// ============================================================================
+// Inventory / Stock module (Phase 3)
+//
+// Reverse-engineered from article_generale.cs / ajouter_article.cs (article
+// master data), creer_bsm.cs / bsm_article.cs (stock issue — "Bon de Sortie
+// Magasin"), creer_brm.cs (stock return — "Bon de Retour Magasin"),
+// creer_reception.cs (goods receipt), and mvt_stock.cs.
+//
+// IMPORTANT DESIGN NOTE: the legacy app has NO physical stock-movement
+// ledger table. mvt_stock.cs computes the movement history on the fly by
+// UNIONing four transactional sources: Reception (in), Bsm (out), Brm
+// (in — returns), and subcontracting raw-material consumption (ds_mp, not
+// yet modeled — belongs to the Sous-Traitance module). This schema
+// preserves that design: movements are derived, not stored. See the
+// `/inventory/mouvements` page for the computed ledger view.
+// ============================================================================
+
+model Magasin {
+  id           Int       @id @default(autoincrement())
+  codeMagasin  String?   @map("code_magasin")
+  designation  String
+  deleted      Boolean   @default(false)
+
+  articles Article[]
+
+  @@map("magasin")
+}
+
+model Famille {
+  id           Int       @id @default(autoincrement())
+  codeFamille  String?   @map("code_famille")
+  designation  String
+  deleted      Boolean   @default(false)
+
+  sousFamilles SousFamille[]
+  budgetCategories BudgetCategorie[]
+  activites ActiviteFamille[]
+
+  @@map("famille")
+}
+
+model SousFamille {
+  id               Int      @id @default(autoincrement())
+  idFamille        Int?     @map("id_famille")
+  famille          Famille? @relation(fields: [idFamille], references: [id])
+  codeSousFamille  String?  @map("code_sous_famille")
+  designation      String
+  deleted          Boolean  @default(false)
+
+  articles TableauArticleSousFamille[]
+  caracteristiques Caracteristique[]
+  activites ActiviteSousFamille[]
+
+  @@map("sous_famille")
+}
+
+model Article {
+  id               Int       @id @default(autoincrement())
+  codeArticle      String?   @map("code_article")
+  reference        String?
+  designation      String
+  tva              Decimal?
+  prixHt           Decimal?  @map("prix_ht")
+  stockNeuf        Decimal   @default(0) @map("stock_neuf")
+  stockUse         Decimal   @default(0) @map("stock_use")
+  stockRebute      Decimal   @default(0) @map("stock_rebute")
+  stockReparableManuel Decimal? @map("stock_reparable_manuel") // 4th stock category, missed in the original 3-way split — see spec doc
+  stockMini        Decimal?  @map("stock_mini")
+  stockMaxi        Decimal?  @map("stock_maxi")
+  stockSecurite    Decimal?  @map("stock_securite")
+  marque           String?
+  methodeGestion   String?   @map("methode_gestion")
+  commentaire      String?
+  photo            Bytes?
+  deleted          Boolean   @default(false)
+  pointCommande    Decimal?  @map("point_commande")
+  idMagasin        Int?      @map("id_magasin")
+  magasin          Magasin?  @relation(fields: [idMagasin], references: [id])
+  modificationQt   DateTime? @map("modification_qt") // CORRECTED: real column is a date, not boolean
+
+  sousFamilles     TableauArticleSousFamille[]
+  bsmLignes        BsmArticle[]
+  brmLignes        BrmArticle[]
+  receptionLignes  ReceptionArticle[]
+  daLignes         DaArticle[]
+  dopLignes        DopArticle[]
+  caracteristiques TableauArticleCaracteristique[]
+  unites           TableauArticleUnite[]
+  gammeRessourcesPdr GammeRessourcesPdr[]
+  otRessourcesPdr    OtRessourcesPdr[]
+  reapprovisionnements AcReapprovisionnement[] @relation("ArticleReappro")
+  recompletements AcRecompletement[] @relation("ArticleRecomplet")
+  commandeModifications CommandeModifierArticle[]
+  modificationsHistorique ModificationArticle[]
+  magasinSousTraitance MagasinSousTraitance[]
+  dsMpLignes DsMp[]
+  dsNvArticleLignes DsNvArticle[]
+  dopResultats     DopFini[]
+  devisLignes      DevisArticle[]
+  commentaires     ArticleCommentaire[]
+  fichiers         ArticleFichier[]
+  atelierJobs      AtelierCreer[]
+  classifications  TableauArticleClassification[]
+  emplacements     TableauArticleEmplacement[]
+  stockages        TableauArticleStockage[]
+  equipements      TableauArticleEquipement[]
+  fournisseursListe TableauArticleFournisseur[]
+  livraisonLignes LivraisonArticle[]
+
+  @@map("article")
+}
+
+model TableauArticleSousFamille {
+  id            Int         @id @default(autoincrement())
+  idArticle     Int         @map("id_article")
+  article       Article     @relation(fields: [idArticle], references: [id])
+  idSousFamille Int         @map("id_sous_famille")
+  sousFamille   SousFamille @relation(fields: [idSousFamille], references: [id])
+
+  @@map("tableau_article_sous_famille")
+}
+
+/// Bon de Sortie Magasin — stock issue slip. Goods leaving the warehouse,
+/// most commonly to fulfil a maintenance Work Order (bsmMaintenance flag +
+/// nOt), but also for subcontracting or other purposes (typeStock).
+/// nOt is stored as the legacy app does — a loose text reference to
+/// OrdreTravail.nOt, not a hard foreign key (the source schema doesn't
+/// enforce it either).
+model Bsm {
+  id                Int      @id @default(autoincrement())
+  typeStock         String?  @map("type_stock")
+  bsmMaintenance    Boolean  @default(false) @map("bsm_maintenance")
+  nOt               String?  @map("n_ot") // free-text entry at creation time
+  liOt              String?  @map("li_ot") @db.VarChar(100)
+  // CORRECTED per real schema export: li_ot is varchar(100), NOT an int FK
+  // to OrdreTravail as an earlier pass assumed (that assumption was used to
+  // justify cost-reporting joins in the Analytics module — those queries
+  // have been corrected to join on nOt/OrdreTravail.nOt string equality
+  // instead). Why the app has both nOt and li_ot as separate string fields
+  // remains unclear — see docs/12-schema-validation-findings.md.
+  idReceptionniste  Int?     @map("id_receptionniste")
+  createur          String?
+  dateBsm           DateTime @map("date_bsm")
+  heureBsm          String?  @map("heure_bsm")
+  validation        Boolean  @default(false)
+
+  lignes      BsmArticle[]
+  equipements BsmEquipement[]
+  retours     Brm[]
+  atelierBsms AtelierBsm[]
+
+  // 58,000+ real rows; nOt is filtered directly (Analytics cost report,
+  // among others), confirmed during earlier debugging of a real crash in
+  // that exact query.
+  @@index([nOt])
+  @@map("bsm")
+}
+
+model BsmArticle {
+  id        Int      @id @default(autoincrement())
+  idBsm     Int      @map("id_bsm")
+  bsm       Bsm      @relation(fields: [idBsm], references: [id])
+  idArticle Int      @map("id_article")
+  article   Article  @relation(fields: [idArticle], references: [id])
+  quantite  Decimal  @default(0)
+  prixHt    Decimal? @map("prix_ht")
+
+  // bsm has 58,000+ real rows; these FKs are the standard "all lines for
+  // this header" / "all BSM lines for this article" lookups used
+  // throughout the app.
+  @@index([idBsm])
+  @@index([idArticle])
+  @@map("bsm_article")
+}
+
+/// Which equipment the issued parts were used on — separate from the OT
+/// reference since a BSM can cover multiple pieces of equipment.
+model BsmEquipement {
+  id           Int        @id @default(autoincrement())
+  idBsm        Int        @map("id_bsm")
+  bsm          Bsm        @relation(fields: [idBsm], references: [id])
+  idEquipement Int        @map("id_equipement")
+  equipement   Equipement @relation(fields: [idEquipement], references: [id])
+
+  @@map("bsm_equipement")
+}
+
+/// Bon de Retour Magasin — stock return slip (unused parts going back to
+/// the warehouse). nBsm loosely references the originating Bsm, mirroring
+/// the legacy design (kept nullable/optional, not a hard FK, since a return
+/// isn't always tied to one specific issue).
+model Brm {
+  id          Int      @id @default(autoincrement())
+  typeRetour  String?  @map("type_retour")
+  typeStock   String?  @map("type_stock")
+  retourPar   String?  @map("retour_par")
+  dateRetour  DateTime @map("date_retour")
+  heureRetour String?  @map("heure_retour")
+  idBsm       Int?     @map("id_bsm_ref") // best-effort link, see note above
+  bsm         Bsm?     @relation(fields: [idBsm], references: [id])
+
+  lignes BrmArticle[]
+
+  @@map("brm")
+}
+
+model BrmArticle {
+  id        Int     @id @default(autoincrement())
+  idBrm     Int     @map("id_brm")
+  brm       Brm     @relation(fields: [idBrm], references: [id])
+  idArticle Int     @map("id_article")
+  article   Article @relation(fields: [idArticle], references: [id])
+  quantite  Decimal @default(0)
+
+  @@map("brm_article")
+}
+
+/// Goods receipt. id_commande / id_da in the legacy schema link to the
+/// Procurement module (purchase orders / purchase requests), which hasn't
+/// been built yet — kept as plain nullable ints for now, to be turned into
+/// real relations once that module exists.
+model Reception {
+  id                Int      @id @default(autoincrement())
+  dateReception     DateTime @map("date_reception")
+  heureReception    String?  @map("heure_reception")
+  receptionPar      String?  @map("reception_par")
+  commentaire       String?
+  statut            String?
+  // CORRECTED — confirmed via bl_non_facture.cs/creer_bl.cs and a
+  // direct SQL Server check: 0 = "En Attente BL" (no delivery note
+  // created yet, 15 rows), 1 = "BL Créé" (9749 rows). See
+  // migration/fixups/misc-statut-recovery.ts.
+  dateReel          DateTime? @map("date_reel")
+
+  lignes ReceptionArticle[]
+  bonsLivraison BonLivraison[]
+  commandesLiees ReceptionCommande[]
+
+  @@map("reception")
+}
+
+model ReceptionArticle {
+  id            Int       @id @default(autoincrement())
+  idReception   Int       @map("id_reception")
+  reception     Reception @relation(fields: [idReception], references: [id])
+  idCommande    Int?      @map("id_commande")
+  commande      Commande? @relation(fields: [idCommande], references: [id])
+  idArticle     Int       @map("id_article")
+  article       Article   @relation(fields: [idArticle], references: [id])
+  qtRecu        Decimal   @default(0) @map("qt_recu")
+  etat          String?
+  // CORRECTED — found while investigating a suspicious value pattern
+  // (100/94, not the familiar 0/1/5/10 status convention): this isn't
+  // a status field at all. Confirmed in reception_historique.cs, where
+  // it's selected alongside qt_bon_etat/qt_mauvais_etat — this is a
+  // percentage-in-good-condition figure, not an enum. Field left
+  // as-is (already correctly stores the raw percentage as a string);
+  // no data correction needed, just this clarifying note.
+  qtBonEtat     Decimal?  @map("qt_bon_etat")
+  qtMauvaisEtat Decimal?  @map("qt_mauvais_etat")
+  idDa          Int?      @map("id_da")
+  demandeAchat  DemandeAchat? @relation(fields: [idDa], references: [id])
+
+  // 22,000+ real rows; idReception is the standard "all lines for this
+  // receipt" lookup, idArticle used for per-article receipt history.
+  @@index([idReception])
+  @@index([idArticle])
+  @@map("reception_article")
+}
+
+/// Header-level link between a Reception and the Commande(s) it
+/// corresponds to — confirmed real table, distinct from and complementary
+/// to ReceptionArticle.idCommande above (which matches an individual
+/// received line to a specific order line for DA/PO reconciliation).
+/// This one just tags "this whole delivery relates to order X" — e.g. a
+/// single delivery might fulfill several small orders at once.
+model ReceptionCommande {
+  id          Int        @id @default(autoincrement())
+  idReception Int        @map("id_reception")
+  reception   Reception  @relation(fields: [idReception], references: [id])
+  idCommande  Int        @map("id_commande")
+  commande    Commande   @relation(fields: [idCommande], references: [id])
+
+  @@map("reception_commande")
+}
+
+// ============================================================================
+// Procurement module (Phase 4)
+//
+// Reverse-engineered from ajouter_fournisseur.cs (supplier master),
+// creer_da.cs (purchase request), creer_commande.cs (purchase order),
+// da_confirmer.cs / da_refuser.cs / da_reporter.cs / da_cloturer.cs
+// (approval workflow), and commande_encour.cs / commande_cloture.cs /
+// commande_annule.cs / commande_attente.cs (order lifecycle).
+//
+// WORKFLOW: Demande d'Achat (DA, purchase request) → approved DA lines get
+// pulled into a Commande (PO) sent to a Fournisseur (supplier) →
+// Reception (goods receipt, already modeled in the Inventory module) closes
+// the loop. CommandeArticle links to DaArticle, not Article directly — this
+// preserves full traceability from a received item back to the original
+// request line that justified it.
+//
+// STATUS CODES: the legacy app stores commande.statut as a small int
+// (0=attente, 1=en cours, 5=annulée, 10=clôturée — confirmed from the 4
+// separate list-screen files, one per status). demande_achat.statut only
+// clearly showed 2 codes (0=open, 10=clôturée); the confirm/refuse/report
+// decision itself appears to be tracked via separate per-action audit
+// tables (da_confirmer, da_refuser, da_reporter, da_retourner, da_reenvoyer)
+// rather than distinct statut values. This schema uses readable strings for
+// both, and folds the legacy's 5 separate audit tables into one
+// `DaAction` log (see note on that model) — simpler while keeping the
+// same information.
+// ============================================================================
+
+model Fournisseur {
+  id             Int      @id @default(autoincrement())
+  codeFournisseur String? @map("code_fournisseur")
+  nom            String
+  type           String?
+  activite       String?
+  commentaire    String?
+  tvaDefaut      Decimal? @map("tva_defaut")
+  delai          Decimal? // CORRECTED per real schema: `real`, not int — found while building the migration script
+  remiseDefaut   Decimal? @map("remise_defaut")
+  pays           String?
+  ville          String?
+  codePostal     String?  @map("code_postal")
+  adresse        String?
+  telephone1     String?  @map("telephone_1")
+  telephone2     String?  @map("telephone_2")
+  fax1           String?  @map("fax_1")
+  fax2           String?  @map("fax_2")
+  email          String?
+  siteWeb        String?  @map("site_web")
+  nomBanque      String?  @map("nom_banque")
+  domiciliation  String?
+  iban           String?
+  rib            String?
+  deleted        Boolean  @default(false)
+  fodec          Decimal? // CORRECTED per real schema: `real` (a rate/amount), not a boolean flag as originally modeled
+
+  commandes Commande[]
+  budgetFournisseurs BudgetFournisseur[]
+  dopFournisseurs DopFournisseur[]
+  dopResultats DopFini[]
+  devisFournisseurs DevisFournisseur[]
+  dsDevisInvites DsDevisFournisseur[]
+  dsCommandes DsCommande[]
+  dsLivraisons DsBonLivraison[]
+  factures Facture[]
+  dsFactures DsFacture[]
+  activites TableauFournisseurActivite[]
+  comptes TableauFournisseurCompte[]
+  devises TableauFournisseurDevise[]
+  livraisons TableauFournisseurLivraison[]
+  reglements TableauFournisseurReglement[]
+  fichiers TableauFournisseurFichier[]
+  articlesListe TableauArticleFournisseur[]
+
+  @@map("fournisseur")
+}
+
+/// Demande d'Achat (DA) — purchase request. statut is simplified to
+/// "En cours" / "Clôturée"; the approval decision is tracked via DaAction.
+model DemandeAchat {
+  id        Int      @id @default(autoincrement())
+  dateDa    DateTime @map("date_da")
+  heureDa   String?  @map("heure_da")
+  delai     Int?
+  periode   String?
+  createur  String?
+  demandeur String?
+  statut    String   @default("En cours")
+  // CORRECTED — a real, serious migration bug found by re-checking the
+  // decompiled C# source directly (da_confirmer.cs, da_refuser.cs,
+  // da_reporter.cs, da_cloturer.cs, liste_da.cs): the real source
+  // column is an INTEGER with (at least) 5 distinct codes — 0=En cours,
+  // 1=Confirmée, 2=Refusée, 4=Reportée (3 is skipped/unused in the
+  // source, not a data-entry gap), 10=Clôturée (same 0/1/5/10-style
+  // convention already confirmed for Commande.statut elsewhere in this
+  // schema). This field was originally modeled as a simplified 2-value
+  // string ("En cours"/"Clôturée" only, approval decisions assumed to
+  // live entirely in DaAction) — WRONG, and the already-migrated real
+  // production data confirms it: querying real Postgres data directly
+  // shows only 2 distinct statut values across 7,618 real rows, meaning
+  // every Confirmée/Refusée/Reportée distinction was collapsed into
+  // "Clôturée" (or possibly "En cours") during the original migration
+  // and is not recoverable from the current Postgres data alone — a
+  // real fix-up pass against the original SQL Server source is needed.
+  // See migration/fixups/da-statut-recovery.ts.
+  vue       Boolean  @default(false)
+
+  lignes     DaArticle[]
+  actions    DaAction[]
+  receptions ReceptionArticle[]
+  fichiers   DaFichier[]
+
+  // Full status-transition audit trail — found via a real data-
+  // completeness audit (see migration/fixups/investigate-audit-
+  // findings.ts): 8 non-empty tables in the real source recording
+  // who did what and when for every DA (~24,600 rows total), none of
+  // which were ever migrated. Never surfaced anywhere in the app
+  // before this — genuinely new functionality, not a bug fix, added
+  // as a real history timeline on each DA's page. da_reenvoyer is not
+  // modeled — confirmed 0 rows in the real source, nothing to migrate.
+  historiqueAdministrateur DaAdministrateur[]
+  historiqueCloture        DaCloturer[]
+  historiqueConfirmation   DaConfirmer[]
+  historiqueModification   DaModifier[]
+  historiqueRefus          DaRefuser[]
+  historiqueReport         DaReporter[]
+  historiqueRetour         DaRetourner[]
+  historiqueVue            DaVue[]
+
+  @@map("demande_achat")
+}
+
+// The 8 real audit-trail tables below all share the same real shape:
+// id_da (FK to demande_achat), a "par" column (who — an integer FK
+// with no confirmed target: could plausibly be Utilisateur or
+// Intervenant, sample values are small ids like 1/3 that exist in
+// both tables, and nothing in the real schema disambiguates which one
+// is meant), a date + separate time-as-string column (matching this
+// app's established convention elsewhere), and any table-specific
+// extra fields (da_refuser's cause, da_reporter's nouvel_date).
+// Deliberately left as a bare Int? rather than a guessed relation —
+// resolved in application code by trying both tables, same principle
+// as demande_achat.demandeur elsewhere in this file.
+
+model DaAdministrateur {
+  id           Int          @id @default(autoincrement())
+  idDa         Int          @map("id_da")
+  demandeAchat DemandeAchat @relation(fields: [idDa], references: [id])
+  envoyerPar   Int?         @map("envoyer_par")
+  dateEnvoyer  DateTime     @map("date_envoyer")
+  heureEnvoyer String?      @map("heure_envoyer")
+
+  @@map("da_administrateur")
+}
+
+model DaCloturer {
+  id           Int          @id @default(autoincrement())
+  idDa         Int          @map("id_da")
+  demandeAchat DemandeAchat @relation(fields: [idDa], references: [id])
+  cloturerPar  Int?         @map("cloturer_par")
+  dateCloture  DateTime     @map("date_cloture")
+  heureCloture String?      @map("heure_cloture")
+
+  @@map("da_cloturer")
+}
+
+model DaConfirmer {
+  id             Int          @id @default(autoincrement())
+  idDa           Int          @map("id_da")
+  demandeAchat   DemandeAchat @relation(fields: [idDa], references: [id])
+  confirmerPar   Int?         @map("confirmer_par")
+  dateConfirmer  DateTime     @map("date_confirmer")
+  heureConfirmer String?      @map("heure_confirmer")
+
+  @@map("da_confirmer")
+}
+
+model DaModifier {
+  id            Int          @id @default(autoincrement())
+  idDa          Int          @map("id_da")
+  demandeAchat  DemandeAchat @relation(fields: [idDa], references: [id])
+  modifierPar   Int?         @map("modifier_par")
+  dateModifier  DateTime     @map("date_modifier")
+  heureModifier String?      @map("heure_modifier")
+
+  @@map("da_modifier")
+}
+
+model DaRefuser {
+  id           Int          @id @default(autoincrement())
+  idDa         Int          @map("id_da")
+  demandeAchat DemandeAchat @relation(fields: [idDa], references: [id])
+  refuserPar   Int?         @map("refuser_par")
+  dateRefus    DateTime     @map("date_refus")
+  heureRefus   String?      @map("heure_refus")
+  cause        String?
+
+  @@map("da_refuser")
+}
+
+model DaReporter {
+  id           Int          @id @default(autoincrement())
+  idDa         Int          @map("id_da")
+  demandeAchat DemandeAchat @relation(fields: [idDa], references: [id])
+  reporterPar  Int?         @map("reporter_par")
+  dateReport   DateTime     @map("date_report")
+  heureReport  String?      @map("heure_report")
+  nouvelDate   DateTime?    @map("nouvel_date")
+
+  @@map("da_reporter")
+}
+
+model DaRetourner {
+  id             Int          @id @default(autoincrement())
+  idDa           Int          @map("id_da")
+  demandeAchat   DemandeAchat @relation(fields: [idDa], references: [id])
+  retournerPar   Int?         @map("retourner_par")
+  dateRetourner  DateTime     @map("date_retourner")
+  heureRetourner String?      @map("heure_retourner")
+
+  @@map("da_retourner")
+}
+
+model DaVue {
+  id           Int          @id @default(autoincrement())
+  idDa         Int          @map("id_da")
+  demandeAchat DemandeAchat @relation(fields: [idDa], references: [id])
+  dateVue      DateTime     @map("date_vue")
+  heureVue     String?      @map("heure_vue")
+  vuePar       Int?         @map("vue_par")
+
+  @@map("da_vue")
+}
+
+/// File attachments on a DemandeAchat — confirmed real table, never
+/// modeled until the migration script surfaced the gap (same situation
+/// as PrevSystEch/PrevMesure/PrevAnnuel and EquipementCompteur before
+/// it). Matches the simple id/idParent/adresse shape already used by
+/// every other attachment table in this schema (ArticleFichier,
+/// DsDevisFichier, EquipementPdf, etc).
+model DaFichier {
+  id      Int          @id @default(autoincrement())
+  idDa    Int          @map("id_da")
+  da      DemandeAchat @relation(fields: [idDa], references: [id])
+  adresse String
+
+  @@map("da_fichier")
+}
+
+model DaArticle {
+  id        Int          @id @default(autoincrement())
+  idDa      Int          @map("id_da")
+  da        DemandeAchat @relation(fields: [idDa], references: [id])
+  idArticle Int          @map("id_article")
+  article   Article      @relation(fields: [idArticle], references: [id])
+  qt        Decimal
+  motif     String?
+  qtRestant Decimal      @map("qt_restant") // remaining quantity still to be ordered — enables partial fulfillment across multiple POs
+
+  equipements DaArticleEquipement[]
+  commandeLignes CommandeArticle[]
+
+  // 21,000+ real rows; idDa is the standard "all lines for this
+  // request" lookup, idArticle used for per-article request history.
+  @@index([idDa])
+  @@index([idArticle])
+  @@map("da_article")
+}
+
+/// Which equipment a requested article is for (a DA line can serve
+/// multiple pieces of equipment).
+model DaArticleEquipement {
+  id           Int        @id @default(autoincrement())
+  idDa         Int        @map("id_da")
+  idArticle    Int        @map("id_article")
+  daArticle    DaArticle  @relation(fields: [idArticle], references: [id])
+  idEquipement Int        @map("id_equipement")
+  equipement   Equipement @relation(fields: [idEquipement], references: [id])
+  idLis        Int?       @map("id_lis") // meaning unconfirmed in source — kept as-is, see spec doc
+
+  @@map("da_article_equipement")
+}
+
+/// Unified approval-workflow audit log — folds the legacy app's 5 separate
+/// per-action tables (da_confirmer, da_refuser, da_reporter, da_retourner,
+/// da_reenvoyer) plus da_cloturer into one table with a `type` discriminator.
+model DaAction {
+  id       Int          @id @default(autoincrement())
+  idDa     Int          @map("id_da")
+  da       DemandeAchat @relation(fields: [idDa], references: [id])
+  type     String       // "Confirmée" | "Refusée" | "Reportée" | "Retournée" | "Renvoyée" | "Clôturée"
+  par      String?
+  date     DateTime     @default(now())
+  cause    String?      // refusal reason — only da_refuser has this; found via migration-script audit, not present when this model was first designed
+  nouvelleDate DateTime? @map("nouvelle_date") // rescheduled date — only da_reporter has this, same story as cause
+
+  @@map("da_action")
+}
+
+/// Purchase Order. statut codes confirmed from the legacy list screens:
+/// "En attente" (0), "En cours" (1), "Annulée" (5), "Clôturée" (10).
+model Commande {
+  id                Int         @id @default(autoincrement())
+  nCommande         String?     @map("n_commande")
+  dateCommande      DateTime    @map("date_commande")
+  heureCommande     String?     @map("heure_commande")
+  createur          String?
+  idFournisseur     Int?        @map("id_fournisseur")
+  fournisseur       Fournisseur? @relation(fields: [idFournisseur], references: [id])
+  statut            String      @default("En attente")
+  personneContacter String?     @map("personne_contacter")
+  dateSignature     DateTime?   @map("date_signature")
+  urgence           String?
+  fodec             Boolean     @default(false)
+
+  lignes     CommandeArticle[]
+  receptions ReceptionArticle[]
+  receptionsLiees ReceptionCommande[]
+  modifications CommandeModificationBase[]
+
+  @@map("commande")
+}
+
+/// Order line — links to DaArticle (not Article directly), preserving
+/// traceability back to the original purchase request line.
+model CommandeArticle {
+  id          Int       @id @default(autoincrement())
+  idCommande  Int       @map("id_commande")
+  commande    Commande  @relation(fields: [idCommande], references: [id])
+  idDaArticle Int       @map("id_da_article")
+  daArticle   DaArticle @relation(fields: [idDaArticle], references: [id])
+  qtCommande  Decimal   @map("qt_commande")
+  prixHt      Decimal?  @map("prix_ht")
+  remise      Decimal?
+
+  // 22,000+ real rows; idCommande is the standard "all lines for this
+  // order" lookup.
+  @@index([idCommande])
+  @@map("commande_article")
+}
+
+// ============================================================================
+// Workshop module (Phase 5) — "Atelier"
+//
+// Reverse-engineered from atelier_creer.cs, atelier_historique.cs,
+// atelier_fiche_reception_controle_piece.cs, atelier_suivi_journalier.cs,
+// atelier_liste_bsm.cs, and the atelier_parametre_*.cs reference-data forms.
+//
+// IMPORTANT: despite the shared name, this is NOT the same "atelier" as
+// the Production module's unite_production (which is a fixed processing
+// stage: Préparation/Fabrication/Four/Emballage). This "Atelier" is an
+// internal machine shop / tool room that fabricates custom spare parts
+// from technical drawings (n_plan/n_revision — a real engineering drawing
+// reference) — closer to a job-shop manufacturing tracker than a
+// production line. Confirmed by atelier_piece, a genuine dimensional
+// first-article-inspection record (nominal measurement + tolerance +
+// 6 sample readings).
+// ============================================================================
+
+model AtelierMachine {
+  id          Int      @id @default(autoincrement())
+  designation String
+  deleted     Boolean  @default(false)
+
+  suivis AtelierSuiviJournalier[]
+
+  @@map("atelier_machine")
+}
+
+model AtelierParametrePiece {
+  id          Int      @id @default(autoincrement())
+  designation String
+  deleted     Boolean  @default(false)
+
+  jobs AtelierCreer[]
+
+  @@map("atelier_parametre_piece")
+}
+
+model AtelierParametrePriorite {
+  id          Int      @id @default(autoincrement())
+  designation String
+  deleted     Boolean  @default(false)
+
+  jobs AtelierCreer[]
+
+  @@map("atelier_parametre_priorite")
+}
+
+model AtelierParametreConception {
+  id          Int      @id @default(autoincrement())
+  designation String
+  deleted     Boolean  @default(false)
+
+  jobs AtelierCreer[]
+
+  @@map("atelier_parametre_conception")
+}
+
+/// A workshop job — request to fabricate a custom part. n_of is the job's
+/// human-readable reference (numéro d'ordre de fabrication), used as a
+/// loose text key elsewhere (atelier_suivi_journalier), same pattern as
+/// OrdreTravail.nOt in the Maintenance module.
+model AtelierCreer {
+  id                Int      @id @default(autoincrement())
+  nOf               String?  @unique @map("n_of")
+
+  atelier           Int?
+  atelierRef        Equipement? @relation("AtelierJobAtelier", fields: [atelier], references: [id])
+  equipement        Int?
+  equipementRef     Equipement? @relation("AtelierJobEquipement", fields: [equipement], references: [id])
+  sousEquipement    Int?     @map("sous_equipement")
+  sousEquipementRef Equipement? @relation("AtelierJobSousEquipement", fields: [sousEquipement], references: [id])
+  organe            Int?
+  organeRef         Equipement? @relation("AtelierJobOrgane", fields: [organe], references: [id])
+
+  idDemandeur       Int?        @map("id_demandeur")
+  demandeur         Intervenant? @relation(fields: [idDemandeur], references: [id])
+
+  dateConsultation  DateTime?   @map("date_consultation")
+  datePrevu         DateTime?   @map("date_prevu")
+  nPlan             String?     @map("n_plan")
+  nRevision         String?     @map("n_revision")
+  quantite          Decimal?
+  dimension         String?
+
+  idParametrePiece      Int?  @map("id_parametre_piece")
+  parametrePiece         AtelierParametrePiece? @relation(fields: [idParametrePiece], references: [id])
+  idParametrePriorite    Int?  @map("id_parametre_priorite")
+  parametrePriorite      AtelierParametrePriorite? @relation(fields: [idParametrePriorite], references: [id])
+  idParametreConception  Int?  @map("id_parametre_conception")
+  parametreConception    AtelierParametreConception? @relation(fields: [idParametreConception], references: [id])
+
+  etat      String   @default("En Attente") // see spec doc for the full state list
+  createur  String?
+  idArticle Int?     @map("id_article") // the fabricated part, once produced, can become a real stock Article
+  article   Article? @relation(fields: [idArticle], references: [id])
+
+  historique AtelierEtat[]
+  retours    AtelierRetour[]
+  donnees    AtelierDonnees[]
+  pieces     AtelierPiece[]
+  bsms       AtelierBsm[]
+  commentaires AtelierCommentaire[]
+  fichiers     AtelierFichierAttachment[]
+  receptions   AtelierReception[]
+
+  createdAt DateTime @default(now())
+
+  @@map("atelier_creer")
+}
+
+/// Status change history for a job.
+model AtelierEtat {
+  id             Int          @id @default(autoincrement())
+  idAtelier      Int          @map("id_atelier")
+  job            AtelierCreer @relation(fields: [idAtelier], references: [id])
+  dateChangement DateTime     @default(now()) @map("date_changement")
+  etat           String
+
+  @@map("atelier_etat")
+}
+
+/// Return/rejection log. id_nv's exact meaning wasn't recoverable from
+/// static analysis (possibly "non validé" / non-conformity level) — kept
+/// as a plain nullable int pending clarification, see spec doc §5.
+model AtelierRetour {
+  id        Int          @id @default(autoincrement())
+  idAtelier Int          @map("id_atelier")
+  job       AtelierCreer @relation(fields: [idAtelier], references: [id])
+  idNv      Int?         @map("id_nv")
+
+  @@map("atelier_retour")
+}
+
+/// Quality-control reception record for a batch of fabricated/subcontracted
+/// parts — approved vs. blocked quantities, with a release sign-off.
+model AtelierDonnees {
+  id           Int          @id @default(autoincrement())
+  idAtelier    Int          @map("id_atelier")
+  job          AtelierCreer @relation(fields: [idAtelier], references: [id])
+  sousTraitant String?      @map("sous_traitant")
+  qtRecu       Decimal?     @map("qt_recu")
+  pieceApp     Decimal?     @map("piece_app") // pieces approved
+  pieceBloque  Decimal?     @map("piece_bloque") // pieces blocked/rejected
+  remarque     String?
+  liberation   Boolean      @default(false) // QC release/sign-off
+
+  @@map("atelier_donnees")
+}
+
+/// Dimensional first-article-inspection measurement — nominal value +
+/// tolerance band + up to 6 sample readings (p1..p6).
+model AtelierPiece {
+  id             Int          @id @default(autoincrement())
+  idAtelier      Int          @map("id_atelier")
+  job            AtelierCreer @relation(fields: [idAtelier], references: [id])
+  numMes         String?      @map("num_mes")
+  mesureNominale Decimal?     @map("mesure_nominale")
+  plus           Decimal? // upper tolerance
+  tire           Decimal? // lower tolerance ("tiré")
+  p1             Decimal?
+  p2             Decimal?
+  p3             Decimal?
+  p4             Decimal?
+  p5             Decimal?
+  p6             Decimal?
+
+  @@map("atelier_piece")
+}
+
+/// Daily time-tracking log against a machine + operator for a job.
+model AtelierSuiviJournalier {
+  id           Int      @id @default(autoincrement())
+  date         DateTime
+  heureDeb     String?  @map("heure_deb")
+  heureFin     String?  @map("heure_fin")
+  nOf          String?  @map("n_of") // loose text reference to AtelierCreer.nOf, same pattern as Bsm.nOt
+  idMachine    Int?     @map("id_machine")
+  machine      AtelierMachine? @relation(fields: [idMachine], references: [id])
+  idOperateur  Int?     @map("id_operateur")
+  operateur    Intervenant? @relation("AtelierOperateur", fields: [idOperateur], references: [id])
+  qtSolde      Decimal? @map("qt_solde") // remaining quantity still to produce
+  deleted      Boolean  @default(false)
+
+  @@map("atelier_suivi_journalier")
+}
+
+/// Junction: raw material issued (via the existing Inventory Bsm) for a
+/// workshop job.
+model AtelierBsm {
+  id        Int          @id @default(autoincrement())
+  idAtelier Int          @map("id_atelier")
+  job       AtelierCreer @relation(fields: [idAtelier], references: [id])
+  idBsm     Int          @map("id_bsm")
+  bsm       Bsm          @relation(fields: [idBsm], references: [id])
+
+  @@map("atelier_bsm")
+}
+
+// ============================================================================
+// Fleet module (Phase 6) — "Parc Engin" (vehicle fleet)
+//
+// Reverse-engineered from ajouter_engins.cs (vehicle master), engin_assurance.cs
+// / engin_vignette.cs / engin_visite_technique.cs (three near-identical
+// expiry-tracked compliance documents: insurance, road-tax sticker,
+// technical inspection), engin_sortie_carburant.cs (fuel log),
+// engin_compteur_initial.cs, and type_de_vehicule.cs / type_de_carburant.cs /
+// ajouter_chauffeur.cs (reference data).
+//
+// CROSS-MODULE LINK: engin_compteur_initial.id_compteur references
+// equipement_compteur — the SAME counter table used by the Maintenance
+// module's "Préventive Syst Compteur" plans and the Production module's
+// fabrication-counter increments. This means a vehicle's odometer can (in
+// principle) drive preventive-maintenance scheduling exactly like a
+// production machine's cycle counter. ASSUMPTION: since equipement_compteur
+// requires an id_equipement, this schema adds an optional idEquipement
+// link on Engin so a vehicle can be represented in the shared Equipement
+// tree when it needs counter-based maintenance — this wasn't directly
+// confirmed in the legacy code and is flagged in the spec doc.
+// ============================================================================
+
+model TypeVehicule {
+  id            Int      @id @default(autoincrement())
+  codeVehicule  String?  @map("code_vehicule")
+  designation   String
+  deleted       Boolean  @default(false)
+
+  engins Engin[]
+
+  @@map("type_de_vehicule")
+}
+
+model TypeCarburant {
+  id          Int      @id @default(autoincrement())
+  designation String
+  deleted     Boolean  @default(false)
+
+  sorties EnginSortieCarburant[]
+  bonsCarburant BonDeCarburant[]
+  parcLiaisons EnginParcLiaisonCarburant[]
+
+  @@map("type_de_carburant")
+}
+
+model Chauffeur {
+  id      Int      @id @default(autoincrement())
+  code    String?
+  nom     String
+  deleted Boolean  @default(false)
+
+  engins Engin[]
+  bonsCarburant BonDeCarburant[]
+  voyages Voyage[]
+  reclamations ReclamationAnomalie[]
+
+  @@map("chauffeur")
+}
+
+model CategorieDeCharge {
+  id            Int      @id @default(autoincrement())
+  codeCategorie String?  @map("code_categorie") // CORRECTED: real column found while building the migration script, not previously modeled
+  designation   String
+  deleted       Boolean  @default(false)
+
+  engins Engin[]
+
+  @@map("categorie_de_charge")
+}
+
+/// A fleet vehicle. See module note above re: the optional Equipement link.
+model Engin {
+  id           Int      @id @default(autoincrement())
+  matricule    String?  // license plate
+  numCarte     String?  @map("num_carte") // fuel card number
+  designation  String
+  marque       String?
+  idVehicule   Int?     @map("id_vehicule")
+  typeVehicule TypeVehicule? @relation(fields: [idVehicule], references: [id])
+  idChauffeur  Int?     @map("id_chauffeur")
+  chauffeur    Chauffeur? @relation(fields: [idChauffeur], references: [id])
+  idCategorie  Int?     @map("id_categorie")
+  categorie    CategorieDeCharge? @relation(fields: [idCategorie], references: [id])
+  liaison      String?
+  deleted      Boolean  @default(false)
+
+  // CORRECTED: the real link is the OPPOSITE direction — Equipement has an
+  // `engin` column pointing here, not the other way around. The earlier
+  // speculative `Engin.idEquipement` field (flagged as an unconfirmed
+  // assumption) is removed; see Equipement.engin below and
+  // docs/12-schema-validation-findings.md.
+  equipementRef Equipement?
+
+  assurances       EnginAssurance[]
+  vignettes        EnginVignette[]
+  visitesTechnique EnginVisiteTechnique[]
+  sortiesCarburant EnginSortieCarburant[]
+  fichiers         EnginFichier[]
+  reclamations     ReclamationAnomalie[]
+  bonsCarburant    BonDeCarburant[]
+  voyages          Voyage[]
+
+  @@map("engins")
+}
+
+/// Insurance, road-tax sticker (vignette), and technical inspection all
+/// share the same shape in the legacy app (date_deb/date_exp/prix/
+/// not_avant) — kept as 3 separate tables matching the source rather than
+/// unifying, since each has its own dedicated screen and report.
+model EnginAssurance {
+  id           Int      @id @default(autoincrement())
+  idEngin      Int      @map("id_engin")
+  engin        Engin    @relation(fields: [idEngin], references: [id])
+  raisonSocial String?  @map("raison_social") // insurer name
+  dateDeb      DateTime @map("date_deb")
+  dateExp      DateTime @map("date_exp")
+  prix         Decimal?
+  notAvant     Int?     @map("not_avant") // notify N days before expiry
+  deleted      Boolean  @default(false)
+
+  @@map("engins_assurance")
+}
+
+model EnginVignette {
+  id       Int      @id @default(autoincrement())
+  idEngin  Int      @map("id_engin")
+  engin    Engin    @relation(fields: [idEngin], references: [id])
+  dateDeb  DateTime @map("date_deb")
+  dateExp  DateTime @map("date_exp")
+  prix     Decimal?
+  notAvant Int?     @map("not_avant")
+  deleted  Boolean  @default(false)
+
+  @@map("engins_vignette")
+}
+
+model EnginVisiteTechnique {
+  id         Int      @id @default(autoincrement())
+  idEngin    Int      @map("id_engin")
+  engin      Engin    @relation(fields: [idEngin], references: [id])
+  dateDeb    DateTime @map("date_deb")
+  dateExp    DateTime @map("date_exp")
+  prix       Decimal?
+  notAvant   Int?     @map("not_avant")
+  typeVisite String?  @map("type_visite")
+  deleted    Boolean  @default(false)
+
+  @@map("engins_visite_technique")
+}
+
+/// Fuel dispensing log — quantity, unit/total price, and the odometer
+/// reading at fill-up (feeds fuel-consumption-per-km reporting).
+model EnginSortieCarburant {
+  id        Int           @id @default(autoincrement())
+  quantite  Decimal
+  prixU     Decimal?      @map("prix_u")
+  prixTtc   Decimal?      @map("prix_ttc")
+  date      DateTime
+  heure     String?
+  idEngin   Int           @map("id_engin")
+  engin     Engin         @relation(fields: [idEngin], references: [id])
+  idCarbu   Int?          @map("id_carbu")
+  carburant TypeCarburant? @relation(fields: [idCarbu], references: [id])
+  compteur  Decimal?      // odometer reading at time of fill-up
+  deleted   Boolean       @default(false)
+
+  @@map("engin_sortie_carburant")
+}
+
+/// Initial odometer/counter reading for a vehicle — links to the shared
+/// equipement_compteur table (see module note above).
+model EnginCompteurInitial {
+  id            Int      @id @default(autoincrement())
+  idCompteur    Int      @unique @map("id_compteur")
+  compteur      EquipementCompteur @relation(fields: [idCompteur], references: [id])
+  valeurInitial Decimal  @map("valeur_initial")
+
+  @@map("engin_compteur_initial")
+}
+
+model EnginFichier {
+  id       Int    @id @default(autoincrement())
+  idEngin  Int    @map("id_engin")
+  engin    Engin  @relation(fields: [idEngin], references: [id])
+  adresse  String?
+
+  @@map("engins_fichier")
+}
+
+// ============================================================================
+// Budget module (Phase 7)
+//
+// Reverse-engineered from creer_budget.cs, liste_budget.cs,
+// liste_budget_variation.cs, liste_budget_modifier.cs.
+//
+// IMPORTANT DESIGN NOTE: like the Inventory movements ledger and Fleet
+// expiry panel, this module stores NO spend-tracking data of its own. A
+// Budget is just a spending envelope (amount + recurrence period +
+// optional scope by category or supplier); actual spend is computed live
+// by aggregating the EXISTING Procurement data (Commande/CommandeArticle),
+// scoped through Article -> SousFamille -> Famille when categorieChoix is
+// set, or through Commande.idFournisseur when fournisseurChoix is set.
+// This preserves the legacy design and avoids a second source of truth for
+// spend data that could drift from the real purchase orders.
+// ============================================================================
+
+/// Recurrence period for a budget envelope, confirmed from the legacy
+/// dropdown (creer_budget.select_duree).
+/// Values: "Chaque Jour" | "Chaque Semaine" | "Chaque 2 Semaine" |
+/// "Chaque Mois" | "Chaque 2 Mois" | "Chaque Trimestre" | "Chaque Simestre"
+/// | "Chaque Année"
+model Budget {
+  id             Int      @id @default(autoincrement())
+  nom            String
+  description    String?
+  dateCreation   DateTime @map("date_creation")
+  duree          String   @default("Chaque Mois") // recurrence period, see comment above
+  montant        Decimal  // allocated amount for one period
+  creationAuto   Boolean  @default(false) @map("creation_auto") // auto-renew a new period when this one ends
+  categorieChoix Boolean  @default(false) @map("categorie_choix") // scope spend by category (Famille)
+  fournisseurChoix Boolean @default(false) @map("fournisseur_choix") // scope spend by supplier
+  creerNv        Boolean  @default(false) @map("creer_nv") // this row is itself a renewed/new-version instance
+
+  categories   BudgetCategorie[]
+  fournisseurs BudgetFournisseur[]
+
+  @@map("budget")
+}
+
+/// Category scope for a budget — despite the column name "id_categorie",
+/// this joins through sous_famille.id_famille, confirming it references
+/// Famille (not a separate categorie table — none was found in the source).
+model BudgetCategorie {
+  id         Int     @id @default(autoincrement())
+  idBudget   Int     @map("id_budget")
+  budget     Budget  @relation(fields: [idBudget], references: [id])
+  idCategorie Int    @map("id_categorie")
+  famille    Famille @relation(fields: [idCategorie], references: [id])
+
+  @@map("budget_categorie")
+}
+
+/// Supplier scope for a budget.
+model BudgetFournisseur {
+  id            Int         @id @default(autoincrement())
+  idBudget      Int         @map("id_budget")
+  budget        Budget      @relation(fields: [idBudget], references: [id])
+  idFournisseur Int         @map("id_fournisseur")
+  fournisseur   Fournisseur @relation(fields: [idFournisseur], references: [id])
+
+  @@map("budget_fournisseur")
+}
+
+// ============================================================================
+// Subcontracting module (Phase 8) — "Sous-Traitance"
+//
+// Reverse-engineered from ajouter_devis_st.cs, creer_devis_st.cs,
+// creer_commande_st.cs, creer_bl_st.cs, liste_activite.cs, and the various
+// stock_*_st.cs / commande_*_st.cs list screens.
+//
+// This is a parallel workflow to Procurement + Inventory, specifically for
+// work sent to subcontractors: Demande Sous-Traitance (Ds) -> Devis (quote,
+// invites multiple suppliers) -> Commande (order, sourced from the winning
+// quote's lines) -> Bon de Livraison (delivery note, tracks return of
+// repaired/subcontracted items). A 3-location movement log
+// (Usine/Magasin/Réparation — our site / subcontractor's warehouse /
+// actually being worked on) tracks where material physically is.
+//
+// GAP: the `Ds` header's own creation flow was NOT found in static
+// analysis — ds_devis.id_ds and ds_commande.id_ds clearly reference a
+// parent "ds" entity, but no `insert into ds` was found anywhere in the
+// codebase. It's likely created inline from a Maintenance OT via a path
+// this analysis didn't trace, or via a stored procedure. This schema
+// models `Ds` as a lightweight header with an optional OrdreTravail link,
+// which is a reasonable reconstruction, not a confirmed structure — see
+// spec doc §5.
+// ============================================================================
+
+/// Type of subcontracted service — shared with a broader "activite" concept
+/// (type_st flags it as usable in this module; type_article's exact role
+/// is unconfirmed).
+model ActiviteSousTraitance {
+  id           Int      @id @default(autoincrement())
+  code         String?
+  designation  String
+  typeSt       Boolean  @default(true) @map("type_st")
+  typeArticle  String?  @map("type_article")
+  deleted      Boolean  @default(false)
+
+  devisLignes    DsDevisArticle[]
+  magasinItems   MagasinSousTraitance[]
+  commandeLignes DsCommandeArticle[]
+  nvArticleLignes DsNvArticle[]
+  familles ActiviteFamille[]
+  operations ActiviteOperation[]
+  sousFamilles ActiviteSousFamille[]
+
+  @@map("activite")
+}
+
+/// Demande Sous-Traitance — the parent request. See module gap note above.
+// CORRECTION: an earlier pass removed a fictional `Ds` model here, having
+// found no FK constraint for id_ds anywhere in the database and concluding
+// it was just an app-generated grouping number. A real schema export then
+// revealed `demande_sous_traitance` — matching the guessed shape almost
+// exactly (date_creation/heure_creation/createur/statut) — and its
+// creation is confirmed directly in DIST.cs. So the entity IS real; the
+// database just doesn't declare the FK constraint (common in this
+// codebase — id_ds is not the only unenforced reference found). Modeled
+// as a real relation despite the missing DB-level constraint, since that
+// reflects the actual intended design.
+model DemandeSousTraitance {
+  id            Int      @id @default(autoincrement())
+  dateCreation  DateTime @map("date_creation")
+  heureCreation String?  @map("heure_creation")
+  createur      String?
+  statut        Int?     // CONFIRMED via the decompiled C# source's own
+  // dedicated status-transition screens (dist_encours.cs/dist_cloture.cs/
+  // dist_annule.cs, the same pattern as DA's da_confirmer/da_refuser/
+  // da_reporter files) — this was previously flagged as genuinely
+  // unconfirmed, now resolved: 0 = "En cours" (dist_encours.cs's own
+  // filter/default), 1 = "Clôturé" (dist_cloture.cs's own UPDATE),
+  // 5 = "Annulé" (dist_annule.cs's own UPDATE — the same 5=cancelled
+  // convention already confirmed for both DemandeIntervention.statut and
+  // DemandeAchat.statut elsewhere in this schema). Real, already-migrated
+  // Postgres data confirms only 0/1 currently exist (14 / 154 rows,
+  // summing to the exact real row count — no 5 ever occurs in this
+  // company's real history, i.e. no subcontracting request has ever
+  // actually been cancelled). Kept as Int (not converted to the String
+  // convention used by every other statut field in this schema) since
+  // the raw column is genuinely, correctly an integer here and no data
+  // was ever miscoded — this is a UI-layer translation, not a data fix.
+
+  devis     DsDevis[]
+  commandes DsCommande[]
+  magasinItems MagasinSousTraitance[]
+
+  @@map("demande_sous_traitance")
+}
+
+model DsDevis {
+  id       Int      @id @default(autoincrement())
+  idDs     Int      @map("id_ds")
+  ds       DemandeSousTraitance @relation(fields: [idDs], references: [id])
+  dateDevis DateTime @map("date_devis")
+  heureDevis String? @map("heure_devis")
+  createur String?
+  statut   String   @default("En cours")
+  // CORRECTED — confirmed via a direct SQL Server check: the real
+  // column is genuinely integer-coded (matching the same convention
+  // confirmed across DA/DI/DsCommande/Dop elsewhere in this schema).
+  // Only 0 currently appears in real data (4 rows, no other value
+  // observed) — labeled "En attente" as the consistent default state
+  // used everywhere else in this app, though the full value set beyond
+  // 0 isn't independently confirmed here. See
+  // migration/fixups/misc-statut-recovery.ts.
+  livr     Boolean  @default(false) // meaning not fully confirmed — likely "livraison incluse" (delivery included in quote)
+
+  fournisseurs DsDevisFournisseur[]
+  lignes       DsDevisArticle[]
+  fichiers     DsDevisFichier[]
+
+  @@map("ds_devis")
+}
+
+/// Suppliers invited to bid on a quote (a devis can go out to several
+/// subcontractors for comparison).
+model DsDevisFournisseur {
+  id            Int         @id @default(autoincrement())
+  idDevis       Int         @map("id_devis")
+  devis         DsDevis     @relation(fields: [idDevis], references: [id])
+  idFournisseur Int         @map("id_fournisseur")
+  fournisseur   Fournisseur @relation(fields: [idFournisseur], references: [id])
+
+  @@map("ds_devis_fournisseur")
+}
+
+/// Quote line items. id_t's exact target table was not confirmed in
+/// static analysis (possibly a tool/equipment/part reference) — kept as a
+/// plain int pending clarification, see spec doc §5.
+model DsDevisArticle {
+  id          Int                     @id @default(autoincrement())
+  idDevis     Int                     @map("id_devis")
+  devis       DsDevis                 @relation(fields: [idDevis], references: [id])
+  idT         Int?                    @map("id_t")
+  qt          Decimal
+  idActivite  Int?                    @map("id_activite")
+  activite    ActiviteSousTraitance?  @relation(fields: [idActivite], references: [id])
+  prixHt      Decimal?                @map("prix_ht")
+  remise      Decimal?
+  source      String?
+
+  @@map("ds_devis_article")
+}
+
+model DsDevisFichier {
+  id      Int     @id @default(autoincrement())
+  idDevis Int     @map("id_devis")
+  devis   DsDevis @relation(fields: [idDevis], references: [id])
+  adresse String?
+
+  @@map("ds_devis_fichier")
+}
+
+/// Subcontracting purchase order — mirrors Procurement's Commande, but
+/// against a Ds/quote instead of a DemandeAchat.
+model DsCommande {
+  id                Int          @id @default(autoincrement())
+  nCommande         String?      @map("n_commande")
+  dateCommande      DateTime     @map("date_commande")
+  heureCommande     String?      @map("heure_commande")
+  createur          String?
+  idFournisseur     Int?         @map("id_fournisseur")
+  fournisseur       Fournisseur? @relation(fields: [idFournisseur], references: [id])
+  statut            String       @default("En attente")
+  // CORRECTED — found while revisiting this module: the real source
+  // column follows the same 0/1/5/10 integer convention already
+  // confirmed for the regular Commande.statut (0=En attente, 1=En
+  // cours, 5=Annulée, 10=Clôturée — confirmed directly via
+  // commande_encour_st.cs's own SqlDbType.Int parameter). Real,
+  // already-migrated Postgres data confirms the raw digit-strings were
+  // stored directly without ever being relabeled ("1": 2 rows, "5": 13
+  // rows, "10": 139 rows — no "0" currently in the real data). See
+  // migration/fixups/ds-commande-statut-recovery.ts for the corrective
+  // pass — a relabeling only, like DI's fix, not a data-recovery one
+  // like DA's, since nothing was actually lost.
+  personneContacter String?      @map("personne_contacter")
+  dateSignature     DateTime?    @map("date_signature")
+  idDs              Int          @map("id_ds")
+  ds                DemandeSousTraitance @relation(fields: [idDs], references: [id])
+  urgence           String?
+  fodec             Boolean      @default(false)
+
+  lignes     DsCommandeArticle[]
+  livraisons DsBonLivraison[]
+
+  @@map("ds_commande")
+}
+
+model DsCommandeArticle {
+  id         Int                    @id @default(autoincrement())
+  idCommande Int                    @map("id_commande")
+  commande   DsCommande             @relation(fields: [idCommande], references: [id])
+  idT        Int?                   @map("id_t")
+  qt         Decimal
+  idActivite Int?                   @map("id_activite")
+  activite   ActiviteSousTraitance? @relation(fields: [idActivite], references: [id])
+  prixHt     Decimal?               @map("prix_ht")
+  remise     Decimal?
+  source     String?                // confirmed value "ex" ("existant"?) = this line's idT is a MagasinSousTraitance.id (signature_commande_attente_st.cs); other values still unconfirmed
+  reception  Decimal?               @default(0) // quantity already delivered back
+  descr      String?
+
+  livraisonLignes DsLivraisonArticle[]
+
+  @@map("ds_commande_article")
+}
+
+/// Delivery note — subcontracted items/repairs coming back.
+model DsBonLivraison {
+  id            Int        @id @default(autoincrement())
+  idCommande    Int?       @map("id_commande")
+  commande      DsCommande? @relation(fields: [idCommande], references: [id])
+  dateLivraison DateTime   @map("date_livraison")
+  heureLivraison String?   @map("heure_livraison")
+  livraisonPar  String?    @map("livraison_par")
+  statut        String?
+  // CORRECTED — same bug as the regular BonLivraison.statut above,
+  // confirmed via the same C# source (bl_non_facture_st.cs) and a
+  // direct SQL Server check: 0 = "Non Facturé" (7 rows), 1 = "Facturé"
+  // (126 rows). See migration/fixups/misc-statut-recovery.ts.
+  dateReel      DateTime?  @map("date_reel")
+  idFournisseur Int?       @map("id_fournisseur")
+  fournisseur   Fournisseur? @relation(fields: [idFournisseur], references: [id])
+  blFournisseur String?    @map("bl_fournisseur") // the subcontractor's own delivery-note reference
+
+  lignes DsLivraisonArticle[]
+  factures DsFactureLivraison[]
+
+  @@map("ds_bon_livraison")
+}
+
+model DsLivraisonArticle {
+  id                    Int               @id @default(autoincrement())
+  idLivraison           Int               @map("id_livraison")
+  livraison             DsBonLivraison    @relation(fields: [idLivraison], references: [id])
+  idDsCommandeArticle    Int              @map("id_ds_commande_article")
+  commandeArticle        DsCommandeArticle @relation(fields: [idDsCommandeArticle], references: [id])
+  qt                    Decimal
+  prixHt                Decimal?          @map("prix_ht")
+  remise                Decimal?
+  otBlLinks             OtBl[]
+
+  @@map("ds_livraison_article")
+}
+
+/// Material/tool location movement log — the actual physical tracking
+/// mechanism behind the Usine/Magasin/Réparation location screens. Unlike
+/// mvt_stock (Inventory module), this one IS a real stored table in the
+/// legacy app rather than a computed view.
+model DsHistoriqueMvt {
+  id      Int      @id @default(autoincrement())
+  idT     Int?     @map("id_t")
+  idMvt   Int?     @map("id_mvt")
+  dateMvt DateTime @map("date_mvt")
+  heureMvt String? @map("heure_mvt")
+  mvt     String   // "Usine" | "Magasin" | "Réparation" | "Commande" (4th value confirmed via signature_commande_attente_st.cs — logged when a subcontracting order is signed)
+
+  @@map("ds_historique_mvt")
+}
+
+// ============================================================================
+// Tooling module (Phase 9) — "Outillage"
+//
+// Reverse-engineered from liste_outillage.cs (tool master, confirmed via
+// its SELECT joining outils/secteur/tab_type), Outillage_utilisation_lancement.cs
+// (checkout), outillage_date_heure_fin.cs (return), and the
+// outillage_parametre_*.cs reference-data screens.
+//
+// Tool checkout can be tied to a Maintenance work order (n_ot, loose text
+// reference — same pattern as OrdreTravail.nOt elsewhere in this schema).
+// ============================================================================
+
+model Secteur {
+  id          Int      @id @default(autoincrement())
+  code        String?
+  designation String
+
+  outils Outil[]
+
+  @@map("secteur")
+}
+
+model TabType {
+  id          Int      @id @default(autoincrement())
+  code        String?
+  designation String
+
+  outils Outil[]
+  gammeRessources GammeRessourcesOutillage[]
+  otRessources OtRessourcesOutil[]
+
+  @@map("tab_type")
+}
+
+/// Usage/purpose reference list — no confirmed FK linking it to Outil or
+/// TabLancementAffectation was found in static analysis; kept standalone.
+/// See spec doc §5.
+model Utilisation {
+  id          Int      @id @default(autoincrement())
+  code        String?
+  designation String
+
+  outils OutilUtilisation[]
+
+  @@map("utilisation")
+}
+
+model Outil {
+  id           Int      @id @default(autoincrement())
+  photo        Bytes?
+  codeOutils   String?  @map("code_outils")
+  designation  String
+  fkSecteurId  Int?     @map("fk_secteur_id")
+  secteur      Secteur? @relation(fields: [fkSecteurId], references: [id])
+  numSerie     String?  @map("num_serie")
+  numModele    String?  @map("num_modele")
+  fabriquant   String?
+  dateAchat    DateTime? @map("date_achat")
+  finGarantie  DateTime? @map("fin_garantie")
+  miseService  DateTime? @map("mise_service")
+  prixAchat    Decimal? @map("prix_achat")
+  remarque     String?
+  fkTypeId     Int?     @map("fk_type_id")
+  type         TabType? @relation(fields: [fkTypeId], references: [id])
+  etatOutil    String?  @map("etat_outil")
+  statut       Boolean  @default(true) // true = disponible, false = en cours d'utilisation
+
+  affectations TabLancementAffectation[]
+  utilisations OutilUtilisation[]
+
+  @@map("outils")
+}
+
+/// Tool checkout/return log.
+model TabLancementAffectation {
+  id            Int          @id @default(autoincrement())
+  idIntervenant Int?         @map("id_intervenant")
+  intervenant   Intervenant? @relation(fields: [idIntervenant], references: [id])
+  idOutil       Int?         @map("outil")
+  outilRef      Outil?       @relation(fields: [idOutil], references: [id])
+  dateDebut     DateTime?    @map("date_debut")
+  heureDebut    String?      @map("heure_debut")
+  dateFin       DateTime?    @map("date_fin")
+  heureFin      String?      @map("heure_fin")
+  commentaire   String?
+  encours       Boolean      @default(true)
+  nOt           String?      @map("n_ot") // loose text reference to OrdreTravail.nOt
+
+  @@map("tab_lancement_affectation")
+}
+
+// ============================================================================
+// Analytics module (Phase 10) — KPI / Pareto reporting on Maintenance
+//
+// Reverse-engineered from ot_kpi_*.cs (reliability: MTTR/MTBF/TTR),
+// pareto_cout_*.cs (cost ranking by 7 different dimensions), and
+// maintenance_backend.cs (the authoritative total-cost-per-OT formula:
+// parts + labor + subcontracting repair + project cost).
+//
+// NO NEW LEDGER TABLES beyond OtBl/OtProjet below — everything else is
+// computed live from data that already exists in Maintenance/Inventory/
+// Subcontracting, same principle as every other computed-dashboard page
+// in this project (Inventory movements, Fleet expiry, Budget variance).
+// ============================================================================
+
+/// Links a subcontracting delivery-note line to the work order it repaired
+/// parts for — the "cout_reparation" (repair cost) component of an OT's
+/// total cost, confirmed directly from maintenance_backend.cs.
+model OtBl {
+  id            Int                @id @default(autoincrement())
+  idOt          Int                @map("id_ot")
+  ordreTravail  OrdreTravail       @relation(fields: [idOt], references: [id])
+  idLivArticle  Int                @map("id_liv_article")
+  livraisonArticle DsLivraisonArticle @relation(fields: [idLivArticle], references: [id])
+
+  @@map("ot_bl")
+}
+
+/// Project-related cost attributed directly to a work order — the
+/// "cout_projet" component of an OT's total cost.
+model OtProjet {
+  id     Int          @id @default(autoincrement())
+  idOt   Int          @map("id_ot")
+  ordreTravail OrdreTravail @relation(fields: [idOt], references: [id])
+  cout   Decimal
+
+  @@map("ot_projet")
+}
+
+// ============================================================================
+// Comments / file-attachment metadata for Article (Inventory) and
+// AtelierCreer (Workshop job) — P2 items flagged in the Inventory and
+// Workshop module specs. Same simple shape already used elsewhere in this
+// schema (OtCommentaire/OtFichier, DsDevisFichier, EnginFichier): a comment
+// thread and a list of file-attachment references (path/URL only — actual
+// file storage/upload handling is an infrastructure concern outside this
+// schema, same as every other Fichier model here).
+// ============================================================================
+
+model ArticleCommentaire {
+  id        Int      @id @default(autoincrement())
+  idArticle Int      @map("id_article")
+  article   Article  @relation(fields: [idArticle], references: [id])
+  texte     String
+  auteur    String?
+  date      DateTime @default(now())
+
+  @@map("article_commentaire")
+}
+
+model ArticleFichier {
+  id        Int     @id @default(autoincrement())
+  idArticle Int     @map("id_article")
+  article   Article @relation(fields: [idArticle], references: [id])
+  adresse   String?
+
+  @@map("tableau_article_fichier") // CORRECTED: real table, was mapped to a fictional "article_fichier" before the DB cross-check
+}
+
+// ============================================================================
+// Procurement quote step (Phase 11) — "Devis" via "DOP"
+//
+// Discovered via the real schema export (docs/12-schema-validation-
+// findings.md) — this was NOT built in the original Procurement phase,
+// which went straight DemandeAchat -> Commande. The real app has a
+// separate price-survey/RFQ step in between: a DOP (Demande d'Ouverture
+// de Prix — "request to open pricing") invites multiple suppliers to
+// quote on a set of articles; DopFini is the resulting comparison matrix
+// (one row per article x supplier, with their quoted price/availability);
+// a Devis formalizes the chosen result for one supplier.
+//
+// IMPORTANT: like everywhere else in this database, there are ZERO
+// foreign key constraints — Dop/Devis are NOT linked to DemandeAchat or
+// Commande by any declared relation. This appears to be a standalone
+// price-comparison tool: staff run a DOP to survey pricing, then
+// separately create the DA/Commande informed by what they found, without
+// a hard database link back. Modeled accordingly — no relation is forced
+// between this and DemandeAchat/Commande.
+// ============================================================================
+
+model Dop {
+  id       Int      @id @default(autoincrement())
+  dateDop  DateTime @map("date_dop")
+  heureDop String?  @map("heure_dop")
+  createur String?
+  statut   String   @default("En cours")
+  // CORRECTED — confirmed via tableau_comparatif.cs/liste_dop.cs and a
+  // direct SQL Server check: 0 = "En attente" (1 row), 1 = "Confirmée"
+  // (a supplier chosen via the comparison table, 132 rows), 5 =
+  // "Annulée" (23 rows) — the same 5=cancelled convention confirmed
+  // elsewhere in this schema. See
+  // migration/fixups/misc-statut-recovery.ts.
+
+  articles     DopArticle[]
+  fournisseurs DopFournisseur[]
+  resultats    DopFini[]
+  devis        Devis[]
+
+  @@map("dop")
+}
+
+model DopArticle {
+  id        Int     @id @default(autoincrement())
+  idDop     Int     @map("id_dop")
+  dop       Dop     @relation(fields: [idDop], references: [id])
+  idArticle Int     @map("id_article")
+  article   Article @relation(fields: [idArticle], references: [id])
+  qt        Decimal
+
+  @@map("dop_article")
+}
+
+model DopFournisseur {
+  id            Int         @id @default(autoincrement())
+  idDop         Int         @map("id_dop")
+  dop           Dop         @relation(fields: [idDop], references: [id])
+  idFournisseur Int         @map("id_fournisseur")
+  fournisseur   Fournisseur @relation(fields: [idFournisseur], references: [id])
+
+  @@map("dop_fournisseur")
+}
+
+/// The price-comparison matrix: one row per (article, supplier) pair
+/// within a DOP, recording that supplier's quoted price/discount/
+/// available quantity for that article. `fini` flags a row as settled/
+/// decided (exact semantics not confirmed — best-effort boolean mapping).
+model DopFini {
+  id            Int          @id @default(autoincrement())
+  idDop         Int          @map("id_dop")
+  dop           Dop          @relation(fields: [idDop], references: [id])
+  idArticle     Int          @map("id_article")
+  article       Article      @relation(fields: [idArticle], references: [id])
+  idFournisseur Int          @map("id_fournisseur")
+  fournisseur   Fournisseur  @relation(fields: [idFournisseur], references: [id])
+  prixHt        Decimal      @map("prix_ht")
+  remise        Decimal
+  qtDisponible  Decimal?     @map("qt_disponible")
+  fini          Boolean      @default(false)
+
+  @@map("dop_fini")
+}
+
+/// The formalized quote for a chosen supplier, referencing the DOP that
+/// produced it (grouping only — no FK constraint, same as everywhere
+/// else in this schema).
+model Devis {
+  id         Int      @id @default(autoincrement())
+  dateDevis  DateTime @map("date_devis")
+  heureDevis String?  @map("heure_devis")
+  createur   String?
+  idDop      Int      @map("id_dop")
+  dop        Dop?     @relation(fields: [idDop], references: [id])
+  statut     String   @default("En cours")
+  // CORRECTED — same situation as DsDevis above: confirmed
+  // integer-coded via a direct SQL Server check, only 0 currently in
+  // real data (244 rows). Labeled "En attente" as the consistent
+  // default state used everywhere else in this app. See
+  // migration/fixups/misc-statut-recovery.ts.
+  livr       Boolean  @default(false) // meaning not fully confirmed — see DsDevis.livr note
+
+  lignes       DevisArticle[]
+  fournisseurs DevisFournisseur[]
+  fichiers     DevisFichier[]
+
+  @@map("devis")
+}
+
+model DevisArticle {
+  id           Int     @id @default(autoincrement())
+  idDevis      Int     @map("id_devis")
+  devis        Devis   @relation(fields: [idDevis], references: [id])
+  idArticle    Int     @map("id_article")
+  article      Article @relation(fields: [idArticle], references: [id])
+  qtDisponible Decimal @map("qt_disponible")
+  prixHt       Decimal @map("prix_ht")
+  remise       Decimal
+
+  @@map("devis_article")
+}
+
+model DevisFournisseur {
+  id            Int         @id @default(autoincrement())
+  idDevis       Int         @map("id_devis")
+  devis         Devis       @relation(fields: [idDevis], references: [id])
+  idFournisseur Int         @map("id_fournisseur")
+  fournisseur   Fournisseur @relation(fields: [idFournisseur], references: [id])
+
+  @@map("devis_fournisseur")
+}
+
+model DevisFichier {
+  id      Int    @id @default(autoincrement())
+  idDevis Int    @map("id_devis")
+  devis   Devis  @relation(fields: [idDevis], references: [id])
+  adresse String
+
+  @@map("devis_fichier")
+}
+
+model AtelierCommentaire {
+  id         Int          @id @default(autoincrement())
+  idAtelier  Int          @map("id_atelier")
+  job        AtelierCreer @relation(fields: [idAtelier], references: [id])
+  texte      String
+  auteur     String?
+  date       DateTime     @default(now())
+
+  @@map("atelier_commentaire")
+}
+
+model AtelierFichierAttachment {
+  id        Int          @id @default(autoincrement())
+  idAtelier Int          @map("id_atelier")
+  job       AtelierCreer @relation(fields: [idAtelier], references: [id])
+  adresse   String?
+
+  @@map("atelier_fichier")
+}
+
+// ============================================================================
+// Article characteristics & units (Phase 12) — dynamic custom-fields system
+//
+// Discovered via the real schema export. Confirmed a genuine dynamic
+// form-builder scoped per SousFamille: `ajouter_caractéristique.cs`'s field-
+// type dropdown ("TextBox" | "Select Unique" | "Select Multiple" |
+// "CheckBox" | "Radio Button") and `modifier_caracteristique_textbox.cs`'s
+// value-type dropdown ("Chaîne de caractères" | "Entier" | "Réel") were
+// both confirmed directly in the decompiled source, not guessed. This lets
+// each product sub-family define its own custom fields (e.g. "Roulements"
+// might have a "Diamètre intérieur" numeric field; a different sub-family
+// has entirely different fields) — Article itself stays generic, with
+// per-sous-famille characteristics captured in TableauArticleCaracteristique.
+// ============================================================================
+
+model Caracteristique {
+  id               Int         @id @default(autoincrement())
+  idSousFamille    Int         @map("id_sous_famille")
+  sousFamille      SousFamille @relation(fields: [idSousFamille], references: [id])
+  nom              String
+  type             String      // "TextBox" | "Select Unique" | "Select Multiple" | "CheckBox" | "Radio Button" — confirmed values
+  champObligatoire Boolean     @default(false) @map("champ_obligatoire")
+  deleted          Boolean     @default(false)
+
+  options   CaracteristiqueOption[]
+  textboxes CaracteristiqueTextbox[]
+  valeurs   TableauArticleCaracteristique[]
+
+  @@map("caracteristique")
+}
+
+/// Options for "Select Unique"/"Select Multiple"/"Radio Button" type
+/// characteristics.
+model CaracteristiqueOption {
+  id                Int             @id @default(autoincrement())
+  idCaracteristique Int             @map("id_caracteristique")
+  caracteristique   Caracteristique @relation(fields: [idCaracteristique], references: [id])
+  valeurOption      String          @map("valeur_option")
+  defaut            Boolean         @default(false)
+
+  @@map("caracteristique_option")
+}
+
+/// Extra config for "TextBox" type characteristics — confirmed value-type
+/// dropdown from modifier_caracteristique_textbox.cs.
+model CaracteristiqueTextbox {
+  id                Int             @id @default(autoincrement())
+  idCaracteristique Int             @map("id_caracteristique")
+  caracteristique   Caracteristique @relation(fields: [idCaracteristique], references: [id])
+  type              String?         // "Chaîne de caractères" | "Entier" | "Réel" — confirmed values
+  valeurDefaut      String?         @map("valeur_defaut")
+
+  @@map("caracteristique_textbox")
+}
+
+/// The actual recorded value of a characteristic for a specific article.
+model TableauArticleCaracteristique {
+  id                Int             @id @default(autoincrement())
+  idArticle         Int             @map("id_article")
+  article           Article         @relation(fields: [idArticle], references: [id])
+  idCaracteristique Int             @map("id_caracteristique")
+  caracteristique   Caracteristique @relation(fields: [idCaracteristique], references: [id])
+  valeur            String?
+
+  @@map("tableau_article_caracteristique")
+}
+
+model ParametreUniteArticle {
+  id          Int      @id @default(autoincrement())
+  codeUnite   String   @map("code_unite")
+  designation String
+  deleted     Boolean  @default(false)
+
+  articles TableauArticleUnite[]
+  prodFourConsommations ProdFourConsommationElectrique[]
+
+  @@map("parametre_unite_article")
+}
+
+/// Article <-> unit-of-measure link. Modeled as a junction table matching
+/// the real schema shape, even though in practice it's likely one row per
+/// article (purchase/stock unit) rather than a true many-to-many.
+model TableauArticleUnite {
+  id        Int                   @id @default(autoincrement())
+  idArticle Int                   @map("id_article")
+  article   Article               @relation(fields: [idArticle], references: [id])
+  idUnite   Int                   @map("id_unite")
+  unite     ParametreUniteArticle @relation(fields: [idUnite], references: [id])
+
+  @@map("tableau_article_unite")
+}
+
+// ============================================================================
+// Gamme resource planning & OT resource usage (Phase 13)
+//
+// Discovered via the real schema export. GammeOperatoire (an operating
+// procedure template) was a flat table with no resource planning at all —
+// the real app lets each Gamme specify staffing (function + headcount),
+// tooling, and spare-parts requirements up front, then tracks ACTUAL usage
+// per Work Order via the parallel ot_ressources_outil/ot_ressources_pdr
+// tables (ot_ressources_fonction, the staffing counterpart, already
+// existed in this schema since Phase 1).
+// ============================================================================
+
+model GammeRessourcesFonction {
+  id         Int                 @id @default(autoincrement())
+  idFonction Int                 @map("id_fonction")
+  fonction   FonctionIntervenant @relation(fields: [idFonction], references: [id])
+  idGamme    Int                 @map("id_gamme")
+  gamme      GammeOperatoire     @relation(fields: [idGamme], references: [id])
+  nbreRequis Int                 @map("nbre_requis")
+  minPlanif  Int                 @map("min_planif") // planning lead time, exact unit unconfirmed (likely minutes)
+  typeCout   String              @map("type_cout")  // exact values unconfirmed — likely "Interne"/"Externe"
+
+  @@map("gamme_ressources_fonction")
+}
+
+model GammeRessourcesOutillage {
+  id       Int             @id @default(autoincrement())
+  idType   Int             @map("id_type")
+  type     TabType         @relation(fields: [idType], references: [id])
+  idGamme  Int             @map("id_gamme")
+  gamme    GammeOperatoire @relation(fields: [idGamme], references: [id])
+  quantite Int
+
+  @@map("gamme_ressources_outillage")
+}
+
+/// PDR = Pièces de Rechange (spare parts).
+model GammeRessourcesPdr {
+  id        Int             @id @default(autoincrement())
+  idArticle Int             @map("id_article")
+  article   Article         @relation(fields: [idArticle], references: [id])
+  idGamme   Int             @map("id_gamme")
+  gamme     GammeOperatoire @relation(fields: [idGamme], references: [id])
+  quantite  Decimal
+
+  @@map("gamme_ressources_pdr")
+}
+
+/// Actual tool usage recorded against a specific Work Order — the
+/// real-world counterpart to GammeRessourcesOutillage's planning figure.
+/// `dateSh` ("sh" — checkout timestamp, exact meaning of the abbreviation
+/// unconfirmed) records when the tool was actually drawn.
+model OtRessourcesOutil {
+  id           Int          @id @default(autoincrement())
+  idType       Int          @map("id_type")
+  type         TabType      @relation(fields: [idType], references: [id])
+  idOt         Int          @map("id_ot")
+  ordreTravail OrdreTravail @relation(fields: [idOt], references: [id])
+  dateSh       DateTime     @map("date_sh")
+  quantite     Int
+
+  @@map("ot_ressources_outil")
+}
+
+/// Actual spare-parts usage recorded against a specific Work Order.
+model OtRessourcesPdr {
+  id           Int          @id @default(autoincrement())
+  idArticle    Int          @map("id_article")
+  article      Article      @relation(fields: [idArticle], references: [id])
+  idOt         Int          @map("id_ot")
+  ordreTravail OrdreTravail @relation(fields: [idOt], references: [id])
+  quantite     Decimal
+  dateSh       DateTime     @map("date_sh")
+
+  @@map("ot_ressources_pdr")
+}
+
+// ============================================================================
+// Equipment detail tabs (Phase 14)
+//
+// Discovered via the real schema export. Equipement was a bare hierarchy
+// table (id/parent/code/designation) with none of this — the real app
+// tracks purchase/warranty/depreciation info, free-form technical specs,
+// photos, PDF attachments, observation notes, and downtime-cost forecasts
+// per piece of equipment.
+// ============================================================================
+
+/// 1:1 general/administrative info per equipment.
+model EquipementGenerale {
+  id                   Int         @id @default(autoincrement())
+  idEquipement         Int         @unique @map("id_equipement")
+  equipement           Equipement  @relation(fields: [idEquipement], references: [id])
+  reference            String?
+  marque               String?
+  nSerie               String?     @map("n_serie")
+  nModele              String?     @map("n_modele")
+  nContrat             String?     @map("n_contrat")
+  nImmobilisation      String?     @map("n_immobilisation") // fixed-asset number
+  fabricant            String?
+  coutAchat            String?     @map("cout_achat") // CONFIRMED varchar in the real schema, not numeric — stored as free text
+  dateAchat            DateTime?   @map("date_achat")
+  dateMiseEnService    DateTime?   @map("date_mise_en_service")
+  dateFinGarantie      DateTime?   @map("date_fin_garentie") // legacy column name itself is misspelled ("garentie")
+  dateFinAmortissement DateTime?   @map("date_fin_amortissement")
+  fonctionReq          String?     @map("fonction_req")
+
+  @@map("equipement_generale")
+}
+
+/// Repeatable free-form technical specs (e.g. "Puissance moteur" / "50 kW").
+model EquipementTechnique {
+  id           Int        @id @default(autoincrement())
+  idEquipement Int        @map("id_equipement")
+  equipement   Equipement @relation(fields: [idEquipement], references: [id])
+  designation  String
+  observation  String
+
+  @@map("equipement_technique")
+}
+
+model EquipementImage {
+  id           Int        @id @default(autoincrement())
+  idEquipement Int        @map("id_equipement")
+  equipement   Equipement @relation(fields: [idEquipement], references: [id])
+  photo        Bytes?
+
+  @@map("equipement_image")
+}
+
+model EquipementPdf {
+  id           Int        @id @default(autoincrement())
+  idEquipement Int        @map("id_equipement")
+  equipement   Equipement @relation(fields: [idEquipement], references: [id])
+  adresse      String
+
+  @@map("equipement_pdf")
+}
+
+model EquipementObservation {
+  id           Int        @id @default(autoincrement())
+  idEquipement Int        @map("id_equipement")
+  equipement   Equipement @relation(fields: [idEquipement], references: [id])
+  observation  String?
+
+  @@map("equipement_observation")
+}
+
+/// Downtime-cost / failure-rate forecasting data — 1:1 per equipment.
+model EquipementPrevision {
+  id           Int        @id @default(autoincrement())
+  idEquipement Int        @unique @map("id_equipement")
+  equipement   Equipement @relation(fields: [idEquipement], references: [id])
+  coutArret    Decimal?   @map("cout_arrêt")
+  nbreArret    Decimal?   @map("nbre_arrêt")
+  periodeNbr   Decimal?   @map("periode_nbr")
+  periode      String?    // same pattern as PrevSystematique.periode — e.g. "Jour"/"Semaine"/"Mois"/"Année"
+
+  @@map("equipement_prevision")
+}
+
+// ============================================================================
+// Diagnostics module (Phase 15) — Ishikawa/AMDEC root-cause analysis
+//
+// Discovered via the real schema export — a genuinely sophisticated
+// root-cause-analysis workflow tied to Work Orders, confirming what the
+// Maintenance spec had flagged since Phase 1 as "not yet built" (Ishikawa/
+// AMDEC diagnostics). Five per-OT tables plus reference-data catalogs:
+//
+//   OtDiagnosticM         — the root diagnostic entry: which failure mode
+//                           was identified, and its classification (type_m)
+//   OtDiagnosticSymptome  — symptoms observed for this OT
+//   OtDiagnosticDetection — how the failure was detected (type_d)
+//   OtDiagnosticDef       — confirmed root/contributing causes, chained
+//                           via RelationAnomalie's cause hierarchy
+//   OtDiagnosticOperation — diagnostic tests/operations actually performed,
+//                           with start/end timestamps (a checklist-execution log)
+//
+// RelationAnomalie is a genuine discovery: ParametreAnomalie (failure
+// modes) turns out to be a SELF-REFERENCING HIERARCHY (parent/child cause
+// chains — classic Ishikawa fishbone branches), modeled via a separate
+// join table rather than a parent-id column directly on the anomaly table.
+// ============================================================================
+
+/// Parent/child cause hierarchy between failure modes — an Ishikawa-style
+/// fishbone branch structure.
+model RelationAnomalie {
+  id         Int              @id @default(autoincrement())
+  idAnomalie Int              @map("id_anomalie")
+  anomalie   ParametreAnomalie @relation("AnomalieChild", fields: [idAnomalie], references: [id])
+  idParent   Int              @map("id_parent")
+  parent     ParametreAnomalie @relation("AnomalieParent", fields: [idParent], references: [id])
+
+  @@map("relation_anomalie")
+}
+
+/// Which symptoms are catalog-associated with which failure mode —
+/// reference data, not tied to a specific Work Order.
+model SymptomeDefaillance {
+  id            Int               @id @default(autoincrement())
+  idSymptome    Int               @map("id_symptome")
+  symptome      Symptome          @relation(fields: [idSymptome], references: [id])
+  idDefaillance Int               @map("id_defaillance")
+  defaillance   ParametreAnomalie @relation(fields: [idDefaillance], references: [id])
+
+  @@map("symptome_defaillance")
+}
+
+/// Catalog of diagnostic tests/operations available for a given failure
+/// mode (e.g. "Check oil level" for "Oil leak").
+model OperationDiagnostic {
+  id            Int               @id @default(autoincrement())
+  idDefaillance Int               @map("id_defaillance")
+  defaillance   ParametreAnomalie @relation(fields: [idDefaillance], references: [id])
+  code          String?
+  designation   String
+  deleted       Boolean           @default(false)
+
+  otOperations OtDiagnosticOperation[]
+
+  @@map("operation_diagnostic")
+}
+
+/// The root diagnostic entry for a Work Order — which failure mode was
+/// identified, and `typeM`'s classification (exact value set unconfirmed).
+model OtDiagnosticM {
+  id            Int               @id @default(autoincrement())
+  idOt          Int               @map("id_ot")
+  ordreTravail  OrdreTravail      @relation(fields: [idOt], references: [id])
+  idDefaillance Int               @map("id_defaillance")
+  defaillance   ParametreAnomalie @relation(fields: [idDefaillance], references: [id])
+  typeM         String            @map("type_m")
+
+  @@map("ot_diagnostic_m")
+}
+
+/// Additional confirmed root/contributing causes for a Work Order's
+/// diagnosis, beyond the primary failure mode in OtDiagnosticM — chained
+/// via RelationAnomalie's cause hierarchy.
+model OtDiagnosticDef {
+  id            Int               @id @default(autoincrement())
+  idOt          Int               @map("id_ot")
+  ordreTravail  OrdreTravail      @relation(fields: [idOt], references: [id])
+  idDefaillance Int               @map("id_defaillance")
+  defaillance   ParametreAnomalie @relation(fields: [idDefaillance], references: [id])
+
+  @@map("ot_diagnostic_def")
+}
+
+/// How the failure was detected for this Work Order. `typeD`'s exact
+/// value set is unconfirmed — no matching reference/catalog table was
+/// found in the real schema for it.
+model OtDiagnosticDetection {
+  id            Int               @id @default(autoincrement())
+  idOt          Int               @map("id_ot")
+  ordreTravail  OrdreTravail      @relation(fields: [idOt], references: [id])
+  idDefaillance Int               @map("id_defaillance")
+  defaillance   ParametreAnomalie @relation(fields: [idDefaillance], references: [id])
+  typeD         Int               @map("type_d")
+
+  @@map("ot_diagnostic_detection")
+}
+
+/// Symptoms actually observed for this Work Order (as opposed to
+/// SymptomeDefaillance, which is the general catalog association).
+model OtDiagnosticSymptome {
+  id            Int               @id @default(autoincrement())
+  idOt          Int               @map("id_ot")
+  ordreTravail  OrdreTravail      @relation(fields: [idOt], references: [id])
+  idSymptome    Int               @map("id_symptome")
+  symptome      Symptome          @relation(fields: [idSymptome], references: [id])
+  idDefaillance Int               @map("id_defaillance")
+  defaillance   ParametreAnomalie @relation(fields: [idDefaillance], references: [id])
+
+  @@map("ot_diagnostic_symptome")
+}
+
+/// Diagnostic tests/operations actually performed for this Work Order,
+/// with timing — a checklist-execution log against the OperationDiagnostic
+/// catalog.
+model OtDiagnosticOperation {
+  id          Int                 @id @default(autoincrement())
+  idOt        Int                 @map("id_ot")
+  ordreTravail OrdreTravail       @relation(fields: [idOt], references: [id])
+  idOperation Int                 @map("id_operation")
+  operation   OperationDiagnostic @relation(fields: [idOperation], references: [id])
+  debut       DateTime
+  fin         DateTime
+
+  @@map("ot_diagnostic_operation")
+}
+
+// ============================================================================
+// Invoicing (Phase 16) — Procurement & Subcontracting
+//
+// Discovered via the real schema export. `bon_livraison` is a genuine
+// formal delivery-note step, distinct from Reception — it wraps an
+// existing Reception (real FK: id_reception) rather than duplicating its
+// line items (no bon_livraison_article table exists; a guess to that
+// effect was checked directly against the schema export and disproven).
+// Invoices (Facture) then reference one or more delivery notes via the
+// junction FactureLivraison. Subcontracting has an exactly parallel pair
+// (DsFacture/DsFactureLivraison) referencing the already-existing
+// DsBonLivraison instead.
+// ============================================================================
+
+/// CORRECTED: an earlier pass (Phase 16) assumed a BonLivraison had no
+/// line items of its own and simply displayed its linked Reception's
+/// items instead. That was wrong — `creer_bl.cs` confirms a real,
+/// separate `livraison_article` insert with its own qt/prixHt/remise,
+/// independent of `reception_article`. Kept `idReception` (still a real
+/// column, the delivery note does reference the underlying goods
+/// receipt) but added the real line-items relation below.
+model BonLivraison {
+  id             Int        @id @default(autoincrement())
+  dateLivraison  DateTime   @map("date_livraison")
+  heureLivraison String?    @map("heure_livraison")
+  livraisonPar   String?    @map("livraison_par")
+  idReception    Int        @map("id_reception")
+  reception      Reception  @relation(fields: [idReception], references: [id])
+  statut         String     @default("En cours")
+  // CORRECTED — found via a direct SQL Server check against the real
+  // legacy source: this column is genuinely SqlDbType.Int in the C#
+  // source (bl_non_facture.cs/creer_bl.cs), not a string. Confirmed
+  // real distribution: 0 = "Non Facturé" (32 rows), 1 = "Facturé"
+  // (9737 rows). The "En cours" default here was never real — it never
+  // appears in the actual migrated data. See
+  // migration/fixups/misc-statut-recovery.ts.
+  dateReel       DateTime?  @map("date_reel")
+  blFournisseur  String?    @map("bl_fournisseur") // the supplier's own delivery-note reference
+
+  factures FactureLivraison[]
+  lignes   LivraisonArticle[]
+
+  @@map("bon_livraison")
+}
+
+model LivraisonArticle {
+  id             Int          @id @default(autoincrement())
+  idLivraison    Int          @map("id_livraison")
+  livraison      BonLivraison @relation(fields: [idLivraison], references: [id])
+  idArticle      Int          @map("id_article")
+  article        Article      @relation(fields: [idArticle], references: [id])
+  qt             Decimal
+  prixHt         Decimal      @map("prix_ht")
+  remise         Decimal
+  investissement Boolean?     // capital-investment flag — source is a nullable int, standard 0/1 pattern
+
+  @@map("livraison_article")
+}
+
+// ============================================================================
+// Remaining small tables (Phase 26)
+// ============================================================================
+
+/// Items received back at a Workshop job (AtelierCreer) — a receipt log,
+/// distinct from the goods-receipt Reception used elsewhere.
+model AtelierReception {
+  id            Int          @id @default(autoincrement())
+  idAtelier     Int          @map("id_atelier")
+  job           AtelierCreer @relation(fields: [idAtelier], references: [id])
+  dateReception DateTime     @map("date_reception")
+  qtRecu        Decimal      @map("qt_recu")
+  etat          String?
+
+  @@map("atelier_reception")
+}
+
+/// Cost-center scoping for a Gamme, parallel to OtCentreCharge's existing
+/// design (bare int, no lookup table confirmed to exist for centre_charge).
+/// CORRECTED before shipping: initially modeled with a bare
+/// `idCentreCharge` int, matching OtCentreCharge's state *before* tier 23
+/// added ParametreCentreCharge. Since that lookup table now exists, this
+/// gets the real relation from the start rather than repeating the same
+/// gap tier 23 already had to come back and fix once.
+model GammeCentreCharge {
+  id             Int                    @id @default(autoincrement())
+  idGamme        Int                     @map("id_gamme")
+  gamme          GammeOperatoire         @relation(fields: [idGamme], references: [id])
+  idCentreCharge Int?                    @map("id_centre_charge")
+  centreCharge   ParametreCentreCharge?  @relation(fields: [idCentreCharge], references: [id])
+
+  @@map("gamme_centre_charge")
+}
+
+/// A checklist of maintenance operations tied to an intervention type —
+/// parallel in spirit to ActiviteOperation (Phase 25) but for
+/// ParametreIntervention rather than ActiviteSousTraitance.
+model OperationMaintenance {
+  id            Int                  @id @default(autoincrement())
+  idIntervention Int                 @map("id_intervention")
+  intervention  ParametreIntervention @relation(fields: [idIntervention], references: [id])
+  code          String
+  designation   String
+  type          String
+  deleted       Boolean              @default(false)
+
+  @@map("operation_maintenance")
+}
+
+/// Which Utilisation(s) (usage purpose) a specific Outil has been used
+/// for — a usage-purpose log, distinct from TabLancementAffectation
+/// (which tracks checkout/return events).
+model OutilUtilisation {
+  id            Int         @id @default(autoincrement())
+  idOutil       Int         @map("id_outil")
+  outil         Outil       @relation(fields: [idOutil], references: [id])
+  idUtilisation Int         @map("id_utilisation")
+  utilisation   Utilisation @relation(fields: [idUtilisation], references: [id])
+
+  @@map("outil_utilisation")
+}
+
+/// Standalone maintenance-plan reference/template list — no confirmed
+/// incoming FK from any other real table, modeled as a simple lookup.
+model PlanMaintenance {
+  id          Int      @id @default(autoincrement())
+  code        String
+  designation String
+  deleted     Boolean  @default(false)
+
+  @@map("plan_maintenance")
+}
+
+/// Driver-reported vehicle complaint/anomaly log — a Fleet addition,
+/// distinct from EnginAssurance/Vignette/VisiteTechnique (compliance
+/// documents) and EnginSortieCarburant (fuel dispensing).
+model ReclamationAnomalie {
+  id          Int       @id @default(autoincrement())
+  anomalie    String
+  date        DateTime
+  idEngin     Int       @map("id_engin")
+  engin       Engin     @relation(fields: [idEngin], references: [id])
+  idChauffeur Int       @map("id_chauffeur")
+  chauffeur   Chauffeur @relation(fields: [idChauffeur], references: [id])
+  deleted     Boolean   @default(false)
+
+  @@map("reclamation_anomalie")
+}
+
+// `test_equip` is deliberately NOT modeled. Its shape breaks every
+// convention seen across the other 214 real tables in this schema: a
+// varchar primary key (`id_test`) instead of an int identity column,
+// and generic English-ish field names (`created`/`modified`/`parentid`)
+// instead of this app's consistent French naming. Every real feature
+// table in this database follows the same int-identity + French-naming
+// pattern without exception — this one genuinely looks like a leftover
+// test/scratch artifact in the source database itself, not a real
+// application feature. Left out rather than modeled on a guess.
+
+model Facture {
+  id            Int         @id @default(autoincrement())
+  dateFacture   DateTime    @map("date_facture")
+  heureFacture  String?     @map("heure_facture")
+  createur      String?
+  idFournisseur Int         @map("id_fournisseur")
+  fournisseur   Fournisseur @relation(fields: [idFournisseur], references: [id])
+  tva           Decimal
+  dateReel      DateTime?   @map("date_reel")
+  nFacture      String?     @map("n_facture")
+
+  livraisons FactureLivraison[]
+
+  @@map("facture")
+}
+
+model FactureLivraison {
+  id           Int          @id @default(autoincrement())
+  idFacture    Int          @map("id_facture")
+  facture      Facture      @relation(fields: [idFacture], references: [id])
+  idLivraison  Int          @map("id_livraison")
+  livraison    BonLivraison @relation(fields: [idLivraison], references: [id])
+
+  @@map("facture_livraison")
+}
+
+model DsFacture {
+  id            Int         @id @default(autoincrement())
+  dateFacture   DateTime    @map("date_facture")
+  heureFacture  String?     @map("heure_facture")
+  createur      String?
+  idFournisseur Int         @map("id_fournisseur")
+  fournisseur   Fournisseur @relation(fields: [idFournisseur], references: [id])
+  tva           Decimal
+  dateReel      DateTime?   @map("date_reel")
+  nFacture      String?     @map("n_facture")
+
+  livraisons DsFactureLivraison[]
+
+  @@map("ds_facture")
+}
+
+model DsFactureLivraison {
+  id          Int            @id @default(autoincrement())
+  idFacture   Int            @map("id_facture")
+  facture     DsFacture      @relation(fields: [idFacture], references: [id])
+  idLivraison Int            @map("id_livraison")
+  livraison   DsBonLivraison @relation(fields: [idLivraison], references: [id])
+
+  @@map("ds_facture_livraison")
+}
+
+// ============================================================================
+// Automatic reorder planning (Phase 18) — Inventory
+//
+// Discovered via the real schema export. Two distinct recurring reorder
+// methods, both never modeled before this pass: "Réapprovisionnement"
+// (fixed order quantity `qt` each cycle) and "Recomplétement" (no fixed
+// quantity — replenishes up to a target level, presumably Article's
+// existing stockMaxi, though no direct FK confirms this). Both share the
+// same recurrence shape already seen in PrevSystematique
+// (dateDebut/reccurence/periode/dateLimite/arr), and each has a parallel
+// "_ech" (échéance — due-date occurrence) table logging when a cycle
+// actually came due, mirroring how OtReinitCompteur tracks preventive-
+// maintenance triggers.
+// ============================================================================
+
+model AcReapprovisionnement {
+  id          Int      @id @default(autoincrement())
+  idArticle   Int      @map("id_article")
+  article     Article  @relation("ArticleReappro", fields: [idArticle], references: [id])
+  qt          Decimal  // fixed reorder quantity each cycle
+  delai       Int      // lead time
+  dateDebut   DateTime @map("date_debut")
+  heureDebut  String?  @map("heure_debut")
+  reccurence  Int      // cycle count, same pattern as PrevSystematique.frequence
+  dateLimite  DateTime? @map("date_limite")
+  periode     String?  // "Jour" | "Semaine" | "Mois" | "Année" — same pattern as PrevSystematique.periode
+  arr         Boolean  @default(false)
+
+  echeances AcReapprovisionnementEch[]
+
+  @@map("ac_reapprovisionnement")
+}
+
+model AcReapprovisionnementEch {
+  id        Int                    @id @default(autoincrement())
+  idRep     Int                    @map("id_rep")
+  plan      AcReapprovisionnement  @relation(fields: [idRep], references: [id])
+  dateEch   DateTime               @map("date_ech")
+  heureEch  String?                @map("heure_ech")
+  deleted   Boolean                @default(false)
+
+  @@map("ac_reapprovisionnement_ech")
+}
+
+/// Same shape as AcReapprovisionnement but with no fixed `qt` — replenishes
+/// to a target level rather than a fixed order quantity each cycle.
+model AcRecompletement {
+  id          Int      @id @default(autoincrement())
+  idArticle   Int      @map("id_article")
+  article     Article  @relation("ArticleRecomplet", fields: [idArticle], references: [id])
+  delai       Int
+  dateDebut   DateTime @map("date_debut")
+  heureDebut  String?  @map("heure_debut")
+  reccurence  Int
+  dateLimite  DateTime @map("date_limite")
+  periode     String?
+  arr         Boolean  @default(false)
+
+  echeances AcRecompletementEch[]
+
+  @@map("ac_recompletement")
+}
+
+model AcRecompletementEch {
+  id        Int              @id @default(autoincrement())
+  idRep     Int              @map("id_rep")
+  plan      AcRecompletement @relation(fields: [idRep], references: [id])
+  dateEch   DateTime         @map("date_ech")
+  heureEch  String?          @map("heure_ech")
+  deleted   Boolean          @default(false)
+
+  @@map("ac_recompletement_ech")
+}
+
+// ============================================================================
+// Fleet extras (Phase 19) — Bons de carburant, Voyages
+//
+// Discovered via the real schema export, both confirmed directly against
+// the decompiled source (saisie_de_bons_carburants.cs, saisie_voyage.cs).
+// BonDeCarburant is a fuel VOUCHER/authorization (has a driver + a `nom`
+// label, no odometer reading) — distinct from EnginSortieCarburant
+// (Phase 6, confirmed real fuel dispensing event with an odometer
+// reading, no driver column). Voyage is a straightforward trip log.
+// ============================================================================
+
+model BonDeCarburant {
+  id               Int            @id @default(autoincrement())
+  nom              String
+  quantite         Decimal
+  prixU            Decimal        @map("prix_u")
+  prixTtc          Decimal        @map("prix_ttc")
+  date             DateTime
+  idEngin          Int            @map("id_engin")
+  engin            Engin          @relation(fields: [idEngin], references: [id])
+  idChauffeur      Int            @map("id_chauffeur")
+  chauffeur        Chauffeur      @relation(fields: [idChauffeur], references: [id])
+  idTypeCarburant  Int            @map("id_type_carburant")
+  typeCarburant    TypeCarburant  @relation(fields: [idTypeCarburant], references: [id])
+  deleted          Boolean        @default(false)
+
+  @@map("bon_de_carburant")
+}
+
+model Voyage {
+  id          Int       @id @default(autoincrement())
+  depart      String
+  arrive      String
+  distance    Decimal
+  date        DateTime
+  heureDep    String?   @map("heure_dep")
+  heureArr    String?   @map("heure_arr")
+  idEngin     Int       @map("id_engin")
+  engin       Engin     @relation(fields: [idEngin], references: [id])
+  idChauffeur Int       @map("id_chauffeur")
+  chauffeur   Chauffeur @relation(fields: [idChauffeur], references: [id])
+  deleted     Boolean   @default(false)
+
+  @@map("voyage")
+}
+
+/// Confirmed real table, but with only `id_carburant` + `deleted` — no
+/// `id_engin`/`id_parc` column at all despite the name. Likely a simple
+/// active/inactive toggle for which fuel types apply to the fleet, mostly
+/// redundant with TypeCarburant.deleted. Low confidence on its actual
+/// purpose; modeled minimally, no UI built around it.
+model EnginParcLiaisonCarburant {
+  id            Int           @id @default(autoincrement())
+  idCarburant   Int           @map("id_carburant")
+  typeCarburant TypeCarburant @relation(fields: [idCarburant], references: [id])
+  deleted       Boolean       @default(false)
+
+  @@map("engin_parc_liaison_carburant")
+}
+
+// ============================================================================
+// Order & article modification history (Phase 20) — Procurement/Inventory
+//
+// Discovered via the real schema export. Two distinct audit-log
+// mechanisms: an edit to a purchase-order line (header +
+// per-line snapshot, confirmed real, distinct from anything already
+// modeled), and a separate, simpler log of Article pricing/stock field
+// changes (date-only, no user column — likely written passively whenever
+// those fields are edited, no direct evidence of who made the change).
+// ============================================================================
+
+/// Header for one edit event on a Commande — "who changed this order, and
+/// when". The actual before/after line values live in
+/// CommandeModifierArticle below.
+model CommandeModificationBase {
+  id                 Int      @id @default(autoincrement())
+  idCommande         Int      @map("id_commande")
+  commande           Commande @relation(fields: [idCommande], references: [id])
+  modifierPar        String?  @map("modifier_par")
+  dateModification   DateTime @map("date_modification")
+  heureModification  String?  @map("heure_modification")
+
+  lignes CommandeModifierArticle[]
+
+  @@map("commande_modification_base")
+}
+
+/// Snapshot of one order line's qt/prixHt/remise at the time of a given
+/// modification event.
+model CommandeModifierArticle {
+  id             Int                      @id @default(autoincrement())
+  idModification Int                      @map("id_modification")
+  modification   CommandeModificationBase @relation(fields: [idModification], references: [id])
+  idArticle      Int                      @map("id_article")
+  article        Article                  @relation(fields: [idArticle], references: [id])
+  qt             Decimal
+  prixHt         Decimal                  @map("prix_ht")
+  remise         Decimal
+
+  @@map("commande_modifier_article")
+}
+
+/// Passive change log for Article pricing/stock fields — no user column,
+/// date only. Written whenever these fields are edited.
+model ModificationArticle {
+  id               Int       @id @default(autoincrement())
+  idArticle        Int       @map("id_article")
+  article          Article   @relation(fields: [idArticle], references: [id])
+  tva              Decimal?
+  prixHt           Decimal?  @map("prix_ht")
+  stockNeuf        Decimal?  @map("stock_neuf")
+  stockUse         Decimal?  @map("stock_use")
+  stockRebute      Decimal?  @map("stock_rebute")
+  dateModification DateTime  @map("date_modification")
+
+  @@map("modification_article")
+}
+
+// ============================================================================
+// Subcontracting raw-material provisioning & custom items (Phase 21)
+//
+// Discovered via the real schema export. Corrects an earlier assumption
+// from the Sous-Traitance module (Phase 8): `id_t`/`source` on
+// DsDevisArticle/DsCommandeArticle was modeled as possibly polymorphic,
+// pointing either at Article directly or at a separate "custom items"
+// catalog (guessed to be ds_nv_article). The real schema shows
+// ds_nv_article ALSO has a real id_article FK — it's not an alternative
+// catalog, it's its own request entity (a "new/custom" fabrication
+// request against a base article, with its own quantity/activité/
+// description), which `id_t` may reference when `source` indicates
+// "Nv" rather than referencing Article directly. ds_mp is simpler: raw
+// material the company sends TO a subcontractor for a given request.
+//
+// `id_demande` on both tables has no confirmed target (no FK constraints
+// exist anywhere in this 215-table database — see docs/12-schema-
+// validation-findings.md §"zero FK constraints"). It's plausibly a loose
+// grouping reference similar to id_ds elsewhere, but that's a guess —
+// modeled as a plain unconstrained integer.
+// ============================================================================
+
+/// Raw material ("Matière Première") the company provides to a
+/// subcontractor for a given request.
+model DsMp {
+  id        Int     @id @default(autoincrement())
+  idDemande Int     @map("id_demande") // no confirmed target — see module note above
+  idArticle Int     @map("id_article")
+  article   Article @relation(fields: [idArticle], references: [id])
+  qt        Decimal
+
+  @@map("ds_mp")
+}
+
+/// A "new/custom" fabrication request against a base article — its own
+/// request entity, not a catalog. See module note above for how this
+/// corrects an earlier assumption in the Sous-Traitance module.
+model DsNvArticle {
+  id          Int                    @id @default(autoincrement())
+  idDemande   Int                    @map("id_demande") // no confirmed target — see module note above
+  idArticle   Int                    @map("id_article")
+  article     Article                @relation(fields: [idArticle], references: [id])
+  quantite    Int
+  idActivite  Int                    @map("id_activite")
+  activite    ActiviteSousTraitance  @relation(fields: [idActivite], references: [id])
+  description String?
+
+  @@map("ds_nv_article")
+}
+
+// ============================================================================
+// Magasin Sous-Traitance (Phase 21)
+//
+// Discovered while investigating quote edit/history — confirmed real via
+// historique_devis_st.cs, which joins ds_devis_article.id_t to this table
+// (one resolution path for the id_t/source polymorphism, alongside
+// DsNvArticle already built). Tracks a physical item/tool sent to a
+// subcontractor through its lifecycle: which demande it's currently out
+// on, what activity is being performed, its current location, its
+// current equipment association, and a repair-cycle counter.
+// ============================================================================
+
+model MagasinSousTraitance {
+  id                Int                    @id @default(autoincrement())
+  idArticle         Int                    @map("id_article")
+  article           Article                @relation(fields: [idArticle], references: [id])
+  refInterne        String                 @map("ref_interne")
+  reception         Boolean                @default(false) // has this item been received back? (confirmed int in source, boolean-like)
+  nbrReparation     Int                    @default(0) @map("nbr_reparation")
+  demandeActuel     Int?                   @map("demande_actuel")
+  demande           DemandeSousTraitance?  @relation(fields: [demandeActuel], references: [id])
+  activiteActuel    Int?                   @map("activite_actuel")
+  activite          ActiviteSousTraitance? @relation(fields: [activiteActuel], references: [id])
+  description       String?
+  emplacementActuel String?                @map("emplacement_actuel")
+  equipementActuel  Int?                   @map("equipement_actuel")
+  equipement        Equipement?            @relation(fields: [equipementActuel], references: [id])
+
+  @@map("magasin_sous_traitance")
+}
+
+// ============================================================================
+// Signature (Phase 22) — electronic sign-off PIN for subcontracting order
+// approval
+//
+// Confirmed via signature_commande_attente_st.cs. `designation` is NOT a
+// display name — it's a hashed PIN: the user types a code, the legacy app
+// runs it through `chiffrage_signature(...)` (an unconfirmed, presumably
+// custom hash), and compares against this stored value before allowing
+// them to sign an order. This web version uses bcrypt instead (already
+// the password-hashing choice elsewhere in this schema) rather than
+// attempting to replicate an unconfirmed legacy hash algorithm — a
+// deliberate modernization, not a compatibility claim.
+// ============================================================================
+
+model Signature {
+  id            Int         @id @default(autoincrement())
+  idUtilisateur Int         @unique @map("id_utilisateur") // real table has no unique constraint (matches the zero-constraints pattern everywhere else in this DB) — enforcing one-per-user here is a deliberate, sensible modernization, not a compatibility claim
+  utilisateur   Utilisateur @relation(fields: [idUtilisateur], references: [id])
+  designation   String      // bcrypt hash of the user's signing PIN
+
+  @@map("signature")
+}
+
+// ============================================================================
+// Supplier reference-data / profile (Phase 22)
+//
+// Discovered via the real schema export. Fournisseur previously had no
+// structured profile beyond its own flat fields (Aperçu/Adresse/Banque
+// tabs) — the separate multi-contact list was already flagged as
+// unbuilt in the Procurement spec, and these 6 tables turn out to cover
+// adjacent ground: business activity classification, an internal
+// account/spend-estimate line, currency, delivery terms, payment terms,
+// and file attachments, each as a fournisseur <-> shared-reference-data
+// link (5 of the 6 go through a parametre_* lookup table; file
+// attachments are direct, matching the Fichier pattern used everywhere
+// else in this schema).
+// ============================================================================
+
+model ParametreActiviteFournisseur {
+  id           Int      @id @default(autoincrement())
+  codeActivite String?  @map("code_activite")
+  designation  String
+  deleted      Boolean  @default(false)
+
+  fournisseurs TableauFournisseurActivite[]
+
+  @@map("parametre_activite_fournisseur")
+}
+
+model TableauFournisseurActivite {
+  id            Int                          @id @default(autoincrement())
+  idFournisseur Int                           @map("id_fournisseur")
+  fournisseur   Fournisseur                   @relation(fields: [idFournisseur], references: [id])
+  idActivite    Int                           @map("id_activite")
+  activite      ParametreActiviteFournisseur  @relation(fields: [idActivite], references: [id])
+
+  @@map("tableau_fournisseur_activite")
+}
+
+/// An internal account/spend-estimate line associated with a supplier —
+/// `estimation` (a periodic amount) + `periodeNbre`/`periode` follows the
+/// same recurrence shape already used by Budget/PrevSystematique.
+model ParametreCompteFournisseur {
+  id          Int      @id @default(autoincrement())
+  numero      Int
+  designation String
+  estimation  Decimal
+  periodeNbre Decimal  @map("periode_nbre")
+  periode     String
+  deleted     Boolean  @default(false)
+
+  fournisseurs TableauFournisseurCompte[]
+
+  @@map("parametre_compte_fournisseur")
+}
+
+model TableauFournisseurCompte {
+  id            Int                         @id @default(autoincrement())
+  idFournisseur Int                          @map("id_fournisseur")
+  fournisseur   Fournisseur                  @relation(fields: [idFournisseur], references: [id])
+  idCompte      Int                          @map("id_compte")
+  compte        ParametreCompteFournisseur   @relation(fields: [idCompte], references: [id])
+
+  @@map("tableau_fournisseur_compte")
+}
+
+model ParametreDeviseFournisseur {
+  id          Int      @id @default(autoincrement())
+  designation String
+  conversion  Decimal
+  deleted     Boolean  @default(false)
+
+  fournisseurs TableauFournisseurDevise[]
+
+  @@map("parametre_devise_fournisseur")
+}
+
+model TableauFournisseurDevise {
+  id            Int                         @id @default(autoincrement())
+  idFournisseur Int                          @map("id_fournisseur")
+  fournisseur   Fournisseur                  @relation(fields: [idFournisseur], references: [id])
+  idDevise      Int                          @map("id_devise")
+  devise        ParametreDeviseFournisseur   @relation(fields: [idDevise], references: [id])
+
+  @@map("tableau_fournisseur_devise")
+}
+
+model ParametreLivraisonFournisseur {
+  id            Int      @id @default(autoincrement())
+  codeLivraison String?  @map("code_livraison")
+  designation   String
+  deleted       Boolean  @default(false)
+
+  fournisseurs TableauFournisseurLivraison[]
+
+  @@map("parametre_livraison_fournisseur")
+}
+
+model TableauFournisseurLivraison {
+  id            Int                            @id @default(autoincrement())
+  idFournisseur Int                             @map("id_fournisseur")
+  fournisseur   Fournisseur                     @relation(fields: [idFournisseur], references: [id])
+  idLivraison   Int                             @map("id_livraison")
+  livraison     ParametreLivraisonFournisseur   @relation(fields: [idLivraison], references: [id])
+
+  @@map("tableau_fournisseur_livraison")
+}
+
+model ParametreReglementFournisseur {
+  id            Int      @id @default(autoincrement())
+  codeReglement String?  @map("code_reglement")
+  designation   String
+  deleted       Boolean  @default(false)
+
+  fournisseurs TableauFournisseurReglement[]
+
+  @@map("parametre_reglement_fournisseur")
+}
+
+model TableauFournisseurReglement {
+  id            Int                            @id @default(autoincrement())
+  idFournisseur Int                             @map("id_fournisseur")
+  fournisseur   Fournisseur                     @relation(fields: [idFournisseur], references: [id])
+  idReglement   Int                             @map("id_reglement")
+  reglement     ParametreReglementFournisseur   @relation(fields: [idReglement], references: [id])
+
+  @@map("tableau_fournisseur_reglement")
+}
+
+model TableauFournisseurFichier {
+  id            Int         @id @default(autoincrement())
+  idFournisseur Int         @map("id_fournisseur")
+  fournisseur   Fournisseur @relation(fields: [idFournisseur], references: [id])
+  adresse       String
+
+  @@map("tableau_fournisseur_fichier")
+}
+
+// ============================================================================
+// Article reference-data / profile (Phase 23)
+//
+// Discovered via the real schema export — parallel in shape to the
+// Fournisseur reference-data family (Phase 22): 3 tables link Article to
+// a fixed-category parametre_* lookup (classification/emplacement/
+// stockage), and 2 link Article directly to another real entity
+// (Equipement — which equipment this part fits/is used on; Fournisseur —
+// which supplier(s) carry it, complementing the DOP/Devis price-survey
+// workflow rather than duplicating it).
+//
+// `ParametreImage` is a genuine outlier despite the similar name — a
+// single-row config table (no `id_article` or any FK at all) holding 3
+// fixed site photos (parc/atelier/usine). Modeled as a singleton;
+// deliberately no UI built around it yet since no confirmed usage
+// context (which screen displays these?) was found in the decompiled
+// source, unlike everything else in this migration.
+// ============================================================================
+
+model ParametreClassificationArticle {
+  id                 Int      @id @default(autoincrement())
+  codeClassification String?  @map("code_classification")
+  designation        String
+  deleted            Boolean  @default(false)
+
+  articles TableauArticleClassification[]
+
+  @@map("parametre_classification_article")
+}
+
+model TableauArticleClassification {
+  id                Int                            @id @default(autoincrement())
+  idArticle         Int                             @map("id_article")
+  article           Article                         @relation(fields: [idArticle], references: [id])
+  idClassification  Int                             @map("id_classification")
+  classification    ParametreClassificationArticle  @relation(fields: [idClassification], references: [id])
+
+  @@map("tableau_article_classification")
+}
+
+model ParametreEmplacementArticle {
+  id              Int      @id @default(autoincrement())
+  codeEmplacement String?  @map("code_emplacement")
+  designation     String
+  deleted         Boolean  @default(false)
+
+  articles TableauArticleEmplacement[]
+
+  @@map("parametre_emplacement_article")
+}
+
+model TableauArticleEmplacement {
+  id            Int                          @id @default(autoincrement())
+  idArticle     Int                           @map("id_article")
+  article       Article                       @relation(fields: [idArticle], references: [id])
+  idEmplacement Int                           @map("id_emplacement")
+  emplacement   ParametreEmplacementArticle   @relation(fields: [idEmplacement], references: [id])
+
+  @@map("tableau_article_emplacement")
+}
+
+model ParametreStockageArticle {
+  id           Int      @id @default(autoincrement())
+  codeStockage String?  @map("code_stockage")
+  designation  String
+  deleted      Boolean  @default(false)
+
+  articles TableauArticleStockage[]
+
+  @@map("parametre_stockage_article")
+}
+
+model TableauArticleStockage {
+  id         Int                        @id @default(autoincrement())
+  idArticle  Int                         @map("id_article")
+  article    Article                     @relation(fields: [idArticle], references: [id])
+  idStockage Int                         @map("id_stockage")
+  stockage   ParametreStockageArticle    @relation(fields: [idStockage], references: [id])
+
+  @@map("tableau_article_stockage")
+}
+
+/// Which Equipement(s) this article/part is used on or compatible with —
+/// a direct link, no lookup table involved.
+model TableauArticleEquipement {
+  id           Int        @id @default(autoincrement())
+  idArticle    Int        @map("id_article")
+  article      Article    @relation(fields: [idArticle], references: [id])
+  idEquipement Int        @map("id_equipement")
+  equipement   Equipement @relation(fields: [idEquipement], references: [id])
+
+  @@map("tableau_article_equipement")
+}
+
+/// Which Fournisseur(s) carry this article — complements, doesn't
+/// duplicate, the DOP/Devis price-survey workflow (Phase 11): this is a
+/// standing "usual suppliers" list, not a specific price quote.
+model TableauArticleFournisseur {
+  id            Int         @id @default(autoincrement())
+  idArticle     Int         @map("id_article")
+  article       Article     @relation(fields: [idArticle], references: [id])
+  idFournisseur Int         @map("id_fournisseur")
+  fournisseur   Fournisseur @relation(fields: [idFournisseur], references: [id])
+
+  // 11,000+ real rows; both directions genuinely queried — "which
+  // suppliers carry this article" and "which articles does this
+  // supplier carry".
+  @@index([idArticle])
+  @@index([idFournisseur])
+  @@map("tableau_article_fournisseur")
+}
+
+/// Singleton config — 3 fixed site photos, no per-row key at all in the
+/// source. No confirmed UI destination; modeled but not surfaced yet.
+model ParametreImage {
+  id           Int     @id @default(autoincrement())
+  photoParc    Bytes?  @map("photo_parc")
+  photoAtelier Bytes?  @map("photo_atelier")
+  photoUsine   Bytes?  @map("photo_usine")
+
+  @@map("parametre_image")
+}
+
+// ============================================================================
+// Notification system (Phase 24)
+//
+// Discovered via the real schema export. Two closely related tables:
+// `Notification` is the event (with a polymorphic idN+type reference to
+// whatever triggered it — no real FK, matching the zero-FK-constraint
+// pattern everywhere else in this schema; the exact set of `type` values
+// and which table each maps to isn't confirmed), `NotificationAlerte` is
+// a follow-up/escalation alert tied back to a specific Notification.
+// `idUtilisateur` on both is modeled as a real FK to Utilisateur.id
+// (not the login-string pattern used for `createur`-style audit fields
+// elsewhere) since this represents genuine "who should see this"
+// targeting, not an audit trail of who performed an action.
+// ============================================================================
+
+model Notification {
+  id            Int          @id @default(autoincrement())
+  idN           Int?         @map("id_n") // polymorphic ref to the source entity — target table determined by `type`; partially confirmed via a C# source cross-check ("Création Commande", "OT Nbr Panne", "Signature Commande", "Variation Commande" all appear as real values), full set still not exhaustively confirmed
+  type          String?
+  idUtilisateur Int?         @map("id_utilisateur")
+  utilisateur   Utilisateur? @relation(fields: [idUtilisateur], references: [id])
+  description   String?
+  vue           Boolean      @default(false)
+  dateCreation  DateTime?    @map("date_creation")
+
+  alertes NotificationAlerte[]
+
+  // Real performance issue found: this exact (idUtilisateur, vue) filter
+  // runs on the sidebar's unread-count badge — which means on literally
+  // every single page load across the entire app. With 1.5M+ real rows
+  // and no index, Postgres has no choice but to sequentially scan the
+  // whole table on every click. This single missing index was very
+  // likely the single largest cause of app-wide sluggishness once real
+  // data volume existed — invisible against a handful of seed rows,
+  // severe against real production data.
+  @@index([idUtilisateur, vue])
+  @@map("notification")
+}
+
+model NotificationAlerte {
+  id            Int          @id @default(autoincrement())
+  idNot         Int          @map("id_not")
+  notification  Notification @relation(fields: [idNot], references: [id])
+  type          String
+  idUtilisateur Int?         @map("id_utilisateur")
+  utilisateur   Utilisateur? @relation(fields: [idUtilisateur], references: [id])
+  description   String
+  vue           Boolean      @default(false)
+  dateCreation  DateTime     @map("date_creation")
+
+  // Same universal-page-load query pattern as Notification above —
+  // indexed for the same reason.
+  @@index([idUtilisateur, vue])
+  @@map("notification_alerte")
+}
+
+// ============================================================================
+// Activité scoping & operations checklist (Phase 25)
+//
+// Discovered via the real schema export. Extends the existing
+// ActiviteSousTraitance (Subcontracting) with which Famille/SousFamille
+// of articles an activity applies to, plus a repeatable text checklist
+// of operations that activity involves.
+// ============================================================================
+
+model ActiviteFamille {
+  id          Int                 @id @default(autoincrement())
+  idActivite  Int                 @map("id_activite")
+  activite    ActiviteSousTraitance @relation(fields: [idActivite], references: [id])
+  idFamille   Int                 @map("id_famille")
+  famille     Famille             @relation(fields: [idFamille], references: [id])
+
+  @@map("activite_famille")
+}
+
+model ActiviteOperation {
+  id         Int                   @id @default(autoincrement())
+  idActivite Int                   @map("id_activite")
+  activite   ActiviteSousTraitance @relation(fields: [idActivite], references: [id])
+  operation  String
+
+  @@map("activite_operation")
+}
+
+model ActiviteSousFamille {
+  id            Int                   @id @default(autoincrement())
+  idActivite    Int                   @map("id_activite")
+  activite      ActiviteSousTraitance @relation(fields: [idActivite], references: [id])
+  idSousFamille Int                   @map("id_sous_famille")
+  sousFamille   SousFamille           @relation(fields: [idSousFamille], references: [id])
+
+  @@map("activite_sous_famille")
+}
+
+// ============================================================================
+// OT/Equipement odds and ends (Phase 26)
+//
+// Discovered via the real schema export. `parametre_centre_charge` fills
+// a real gap: `OtCentreCharge.idCentreCharge` (migrated tier 18) was a
+// bare unrelated int with no lookup table behind it at the time —
+// wired up to a real relation now that this table exists, matching the
+// pattern already established for EquipementCompteur (tier 7).
+//
+// `equipement_compteur_historique` and `equipement_compteur_nv` are
+// parallel but distinct: the former is routine measurement history
+// (regular counter readings over time), the latter tracks
+// reset/recalibration events specifically (a counter manually set to a
+// new value, "nv" = nouvelle valeur) — not the same log, kept as two
+// separate tables matching the source.
+//
+// `compteur_liaison` defines which counter governs a given
+// organe+intervention-type combination — likely consulted by the
+// counter-based preventive-maintenance trigger logic (PrevCompteur,
+// tier 11) to resolve which counter applies, though no direct code
+// reference confirming that specific consumer was found.
+// ============================================================================
+
+model ParametreCauseRealisation {
+  id          Int    @id @default(autoincrement())
+  code        String?
+  designation String
+
+  ots OtCauseRealisation[]
+
+  @@map("parametre_cause_realisation")
+}
+
+model OtCauseRealisation {
+  id       Int                       @id @default(autoincrement())
+  idOt     Int                       @map("id_ot")
+  ordreTravail OrdreTravail          @relation(fields: [idOt], references: [id])
+  idCause  Int                       @map("id_cause")
+  cause    ParametreCauseRealisation @relation(fields: [idCause], references: [id])
+
+  @@map("ot_cause_realisation")
+}
+
+model ParametreCentreCharge {
+  id          Int      @id @default(autoincrement())
+  code        String?
+  designation String
+  budget      Decimal?
+
+  ots OtCentreCharge[]
+  gammes GammeCentreCharge[]
+
+  @@map("parametre_centre_charge")
+}
+
+model EquipementCompteurHistorique {
+  id         Int                @id @default(autoincrement())
+  idCompteur Int                @map("id_compteur")
+  compteur   EquipementCompteur @relation(fields: [idCompteur], references: [id])
+  valeur     Decimal
+  dateMesure DateTime           @map("date_mesure")
+
+  @@map("equipement_compteur_historique")
+}
+
+/// Reset/recalibration events — a counter manually set to a new value
+/// ("nv" = nouvelle valeur), distinct from routine measurement history.
+model EquipementCompteurNv {
+  id         Int                @id @default(autoincrement())
+  idCompteur Int                @map("id_compteur")
+  compteur   EquipementCompteur @relation(fields: [idCompteur], references: [id])
+  valeur     Decimal
+  dateNv     DateTime           @map("date_nv")
+
+  @@map("equipement_compteur_nv")
+}
+
+/// Which counter governs a given organe+intervention-type combination.
+model CompteurLiaison {
+  id              Int                  @id @default(autoincrement())
+  idOrgane        Int                  @map("id_organe")
+  organe          Equipement           @relation(fields: [idOrgane], references: [id])
+  idCompteur      Int                  @map("id_compteur")
+  compteur        EquipementCompteur   @relation(fields: [idCompteur], references: [id])
+  idIntervention  Int                  @map("id_intervention")
+  intervention    ParametreIntervention @relation(fields: [idIntervention], references: [id])
+
+  @@map("compteur_liaison")
+}
+
+// ============================================================================
+// Production — remaining pieces (Phase 26)
+//
+// Discovered via the real schema export. `id_saisie` on ProdMesure
+// follows the same naming convention already confirmed on
+// ProdRapportPrepAS (maps to ProdSaisie.id despite the source column
+// being literally named id_qualite there) — applied consistently here.
+// `id_mesure` has no identifiable target table anywhere in this schema;
+// modeled as a plain unconfirmed int rather than guessing a relation.
+// ============================================================================
+
+/// Reference/whitelist table — which measurement type applies to which
+/// ProdSaisie + ProdEquipement combination. Not a report entry (no
+/// id_rapport) — a config table, unlike ProdMesureRapport which stores
+/// actual measured values.
+model ProdMesure {
+  id        Int            @id @default(autoincrement())
+  idMesure  Int            @map("id_mesure") // no identifiable target table — unconfirmed
+  idSaisie  Int            @map("id_saisie")
+  saisie    ProdSaisie     @relation(fields: [idSaisie], references: [id])
+  idUnite   Int            @map("id_unite")
+  unite     Equipement @relation(fields: [idUnite], references: [id])
+
+  @@map("prod_mesure")
+}
+
+/// A team-lead assignment per report+unit — distinct from, not a
+/// duplicate of, ProdRapportCfFabrication/ProdRapportCfEmballage (both
+/// confirmed real, Fabrication/Emballage-specific); this one carries no
+/// line-specific qualifier in its name, so modeled as its own table
+/// rather than assumed identical in scope to either.
+model ProdRapportChefEquipe {
+  id            Int                @id @default(autoincrement())
+  idRapport     Int                @map("id_rapport")
+  rapport       ProdRapportGeneral @relation(fields: [idRapport], references: [id])
+  idUnite       Int                @map("id_unite")
+  unite         Equipement     @relation(fields: [idUnite], references: [id])
+  idChefEquipe  Int                @map("id_chef_equipe")
+  chefEquipe    Intervenant        @relation(fields: [idChefEquipe], references: [id])
+
+  @@map("prod_rapport_chef_equipe")
+}
+
+/// Which product ran on which unit during which hour of a shift — no
+/// quantity/value column (unlike ProdRapportHoraireFabrication's h1-h8
+/// measured values), just a presence/tracking record.
+model ProdRapportHeure {
+  id        Int            @id @default(autoincrement())
+  idRapport Int            @map("id_rapport")
+  rapport   ProdRapportGeneral @relation(fields: [idRapport], references: [id])
+  idUnite   Int            @map("id_unite")
+  unite     Equipement @relation(fields: [idUnite], references: [id])
+  heure     Int
+  idProduit Int            @map("id_produit")
+
+  @@map("prod_rapport_heure")
+}

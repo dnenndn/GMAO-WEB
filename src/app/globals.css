@@ -1,0 +1,163 @@
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/ibm-plex-sans/700.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+@import "@fontsource/ibm-plex-mono/600.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html {
+  color-scheme: light;
+}
+
+body {
+  background: #EEEDE9;
+  color: #201C19;
+}
+
+/* Signature element: the "nameplate" tag used for OT/DI reference numbers,
+   styled after the stamped metal ID plates riveted to industrial equipment. */
+.nameplate {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid #D3CEC5;
+  border-top-color: #E8E4DB;
+  border-left-color: #E8E4DB;
+  background: linear-gradient(180deg, #FCFBF9 0%, #ECE9E1 100%);
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+  color: #423C35;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+}
+
+:focus-visible {
+  outline: 2px solid #A8451B;
+  outline-offset: 2px;
+}
+
+/* Text selection — matches the brand accent instead of the browser's
+   default blue, a small but noticeable detail on a text-heavy ERP. */
+::selection {
+  background: #F3D9C9;
+  color: #201C19;
+}
+
+/* Consistent placeholder color across every form field in the app —
+   currently each page repeats the same input classes individually with
+   no explicit placeholder styling, so this was falling back to
+   inconsistent browser defaults. */
+::placeholder {
+  color: #A39C92;
+  opacity: 1;
+}
+
+/* Thin, understated scrollbar — the default browser scrollbar looks
+   noticeably dated against everything else here. Applies to the
+   sidebar nav and any long table/page content alike. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #C7C1B6;
+  border-radius: 999px;
+  border: 2px solid #EEEDE9;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #A39C92;
+}
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #C7C1B6 transparent;
+}
+
+/* Disabled form controls — a consistent, clearly-inactive look instead
+   of relying on inconsistent per-browser defaults. */
+input:disabled,
+select:disabled,
+textarea:disabled,
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Print — this is an ERP where orders, DIs, and reports genuinely get
+   printed. Hides the navigation chrome so what prints is the actual
+   content, not the app shell around it. */
+@media print {
+  aside {
+    display: none !important;
+  }
+  main {
+    background: white !important;
+  }
+}
+
+/* Dashboard card styling — found undefined while checking for CSS
+   class consistency: the dashboard referenced these 3 classes
+   (surface-panel/metric-card/page-enter) throughout, but none were
+   ever actually defined, so every dashboard widget was rendering with
+   no background, border, or rounded corners at all — a real, highly
+   visible bug on the very first page every user sees. Defined properly
+   here rather than stripped out, since the intent (a standard card
+   look, a hover-lift on stat tiles, a gentle fade-in on load) was
+   clearly there, just never finished. */
+.surface-panel {
+  background: #FFFFFF;
+  border: 1px solid #DCD7CC;
+  border-radius: 3px;
+}
+
+.metric-card {
+  display: block;
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.metric-card:hover {
+  box-shadow: 0 4px 10px rgba(32, 28, 25, 0.06);
+}
+
+@keyframes page-enter-fade {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.page-enter {
+  animation: page-enter-fade 0.25s ease-out;
+}
