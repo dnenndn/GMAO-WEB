@@ -41,11 +41,15 @@ const NAV: NavItem[] = [
   ] },
   { href: "/procurement", label: "Achat", children: [
     { href: "/procurement/suppliers", label: "Fournisseur" },
-    { href: "/procurement/requests", label: "Demande" },
+    { href: "/procurement/requests", label: "Demande d'achat" },
     { href: "/procurement/orders", label: "Commandes" },
-    { href: "/procurement/dop", label: "DOP" },
-    { href: "/procurement/devis", label: "Devis" },
+    { href: "/procurement/receptions", label: "Bon de Réception" },
+    { href: "/procurement/livraisons", label: "Bon de Livraison" },
     { href: "/procurement/factures", label: "Factures" },
+    { href: "/procurement/devis", label: "Gestion des dévis" },
+    { href: "/procurement/dop", label: "DOP" },
+    { href: "/procurement/approvisionnement", label: "Approvisionnement" },
+    { href: "/procurement/dashboard", label: "Tableau de bord" },
   ] },
   { href: "/admin/users", label: "Utilisateur", adminOnly: true },
   { href: "/sous-traitance", label: "Sous Traitance", children: [
